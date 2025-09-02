@@ -192,21 +192,83 @@ stopifnot(ncol(expr_cb) == nrow(design))
 
 print(dim(expr_cb)); print(dim(design)); head(design)
 
-  # 5) limma
+#???????????????????????????????????????????????????????????????????????????????
 
-  fit  <- limma::lmFit(expr_bc, design_cov)
-  lc_p <- grep("^groupPompe$", colnames(design_cov), value = TRUE)
-  lc_c <- grep("^groupControl$", colnames(design_cov), value = TRUE)
-  stopifnot(length(lc_p)==1, length(lc_c)==1)
-  cont <- limma::makeContrasts(PompeVsControl = !!as.name(lc_p) - !!as.name(lc_c),
-                               levels = design_cov)
-  fit2 <- limma::eBayes(limma::contrasts.fit(fit, cont))
-  tt_all <- limma::topTable(fit2, coef="PompeVsControl", number=Inf, adjust.method="BH")
+
+
+  
+  # === Probe -> GEN (SYMBOL) anotasyonu ve gene-level'e indirgeme ===
+  
+  .annotate_and_collapse <- function(tt_all) {
+    stopifnot(is.data.frame(tt_all))
+    probe_ids <- rownames(tt_all)
+    if (is.null(probe_ids)) stop("tt_all rownames (PROBEID) yok.")
+    
+    # --- Uygun .db paketini otomatik yükle ---
+    chip <- tryCatch(annotation(eset), error = function(e) NA)
+    db_pkg <- if (!is.na(chip)) paste0(chip, ".db") else "hgu133plus2.db"
+    if (!requireNamespace("AnnotationDbi", quietly = TRUE))
+      stop("AnnotationDbi lazım.")
+    if (!requireNamespace(db_pkg, quietly = TRUE))
+      stop(sprintf("%s paketi yüklü değil. BiocManager::install('%s')", db_pkg, db_pkg))
+    db <- get(db_pkg)
+    
+    # --- Anotasyon: PROBEID -> SYMBOL ---
+    ann <- AnnotationDbi::select(
+      db,
+      keys    = probe_ids,
+      columns = c("SYMBOL","GENENAME","ENTREZID"),
+      keytype = "PROBEID"
+    )
+    # Aynı (PROBEID,SYMBOL) yinelenirse at
+    ann <- ann[!duplicated(ann[, c("PROBEID","SYMBOL")]), ]
+    
+    # --- Birleştir (1:many olabilir) ---
+    tt_all$PROBEID <- rownames(tt_all)
+    tt_annot <- merge(tt_all, ann, by = "PROBEID", all.x = TRUE, sort = FALSE)
+    
+    # ÖNEMLİ: 1:many geldiği için rownames tekrar eden olur. Güvenli yap:
+    rownames(tt_annot) <- make.unique(as.character(tt_annot$PROBEID))
+    
+    # --- Gene-level indirgeme ---
+    tt_sym <- tt_annot[!is.na(tt_annot$SYMBOL) & nzchar(tt_annot$SYMBOL), ]
+    if (!nrow(tt_sym)) {
+      warning("SYMBOL eşleşmesi yok. Platform paketini/doğruluğunu kontrol et.")
+      return(list(tt_all = tt_annot, tt_gene = tt_sym))
+    }
+    
+    tt_sym$abs_logFC <- abs(tt_sym$logFC)
+    # Her gen için en iyi satır: min adj.P.Val, eşitse max |logFC|
+    tt_sym <- tt_sym[order(tt_sym$SYMBOL, tt_sym$adj.P.Val, -tt_sym$abs_logFC), ]
+    tt_gene <- tt_sym[!duplicated(tt_sym$SYMBOL), ]
+    tt_gene$abs_logFC <- NULL
+    
+    list(tt_all = tt_annot, tt_gene = tt_gene)
+  }
+
+  
+#???????????????????????????????????????????????????????????????????????????????  
+
+# 5) limma
+
+fit  <- limma::lmFit(expr_cb, design)
+cont <- limma::makeContrasts(PompeVsControl = Pompe - Control, levels = design)
+fit2 <- limma::eBayes(limma::contrasts.fit(fit, cont))
+tt_all <- limma::topTable(fit2, coef="PompeVsControl", number=Inf, adjust.method="BH")
   
   # 6) anotasyon + collapse + DEG filtre
-  aa <- .annotate_and_collapse(tt_all)
-  deg <- subset(aa$tt_gene, adj.P.Val < FDR_THRESH & abs(logFC) >= LOGFC_THRESH)
+aa      <- .annotate_and_collapse(tt_all)
+tt_gene <- aa$tt_gene
+deg     <- subset(tt_gene, adj.P.Val < FDR_THRESH & abs(logFC) >= LOGFC_THRESH)
+ 
+  # ÇIKTI ETİKETİ (out_tag) — yoksa akıllıca varsayılan üret
+  if (!exists("out_tag") || is.null(out_tag) || !nzchar(out_tag)) {
+    out_tag <- if (exists("melas_idx") && length(melas_idx) > 0) "noMELAS" else "withMELAS"
+    # İstersen daha açıklayıcı:
+    # out_tag <- paste0("Pompe_vs_Control_", if (length(melas_idx) > 0) "noMELAS" else "withMELAS")
+  }
   
+   
   # 7) yazımlar
   out_dir <- file.path(root_dir, "results", "deg", out_tag)
   dir.create(out_dir, recursive=TRUE, showWarnings=FALSE)
@@ -216,337 +278,245 @@ print(dim(expr_cb)); print(dim(design)); head(design)
             row.names = TRUE)
   
   # küçük özet & dönüş
+  stopifnot(is.list(aa), all(c("tt_all","tt_gene") %in% names(aa)))
+  tt_gene <- aa$tt_gene
+  stopifnot(is.data.frame(tt_gene), "adj.P.Val" %in% names(tt_gene), "logFC" %in% names(tt_gene))
+  
+  deg <- subset(tt_gene, adj.P.Val < FDR_THRESH & abs(logFC) >= LOGFC_THRESH)
+  stopifnot(is.data.frame(deg))  # yanlışlıkla sayıya dönüşmediğini teyit et
+  
   up_n   <- sum(deg$logFC > 0, na.rm = TRUE)
   down_n <- sum(deg$logFC < 0, na.rm = TRUE)
-  message(sprintf("[%s] samples=%d, DEGs=%d (up=%d, down=%d)",
-                  out_tag, ncol(expr_use), nrow(deg), up_n, down_n))
+  message(sprintf("[DEG] n=%d (up=%d, down=%d)", nrow(deg), up_n, down_n))
   
-  return(list(deg=deg, tt_all=tt_all, tt_gene=aa$tt_gene,
-              n_up=up_n, n_down=down_n,
-              out_dir=out_dir, n_samples=ncol(expr_use), tag=out_tag))
-
+#**************************************************************************************
 # ===================== PPI analysis via STRINGdb =====================
 
-run_string_ppi_smart <- function(deg_tbl, root_dir,
-                                 score_min   = 700,
-                                 top_nodes   = 200,
-                                 label_top_n = 20) {
-  stopifnot(nrow(deg_tbl) > 1)
   
-  ppi_dir <- file.path(root_dir, "results", "ppi")
-  dir.create(ppi_dir, recursive = TRUE, showWarnings = FALSE)
   
-  # 1) STRING'e map
-  string_db <- STRINGdb$new(version = "11.5", species = 9606, score_threshold = 400)
-  map_col   <- if ("ENTREZID" %in% colnames(deg_tbl)) "ENTREZID" else "SYMBOL"
-  deg_map   <- string_db$map(deg_tbl, map_col, removeUnmappedRows = TRUE)
-  if (nrow(deg_map) < 2) { message("STRING map yetersiz."); return(invisible(NULL)) }
-  
-  # 2) Etkileşimleri çek
-  hits      <- deg_map$STRING_id
-  ppi_edges <- string_db$get_interactions(hits)
-  if (is.null(ppi_edges) || !nrow(ppi_edges)) { message("PPI kenarı yok."); return(invisible(NULL)) }
-  
-  # 3) Temizlik ve skor filtresi
-  if ("combined_score" %in% names(ppi_edges)) {
-    ppi_edges <- subset(ppi_edges, combined_score >= score_min)
+  # ====== GEREKÇELİ PPI inşa + görselleştirme (STRINGdb) ======
+  # Gereken paketler: STRINGdb, igraph, ggraph, ggplot2, scales
+  run_string_ppi_smart <- function(deg_tbl, root_dir,
+                                   score_min   = 700,   # STRING combined_score eşiği (0-1000)
+                                   top_nodes   = 200,   # en yüksek dereceli max düğüm
+                                   label_top_n = 20,    # etiketlenecek hub sayısı
+                                   out_tag     = NULL)  # çıktı etiketi (örn: "withMELAS")
+  {
+    stopifnot(is.data.frame(deg_tbl), nrow(deg_tbl) > 1)
+    for (pkg in c("STRINGdb","igraph","ggraph","ggplot2","scales"))
+      stopifnot(requireNamespace(pkg, quietly = TRUE))
+    
+    # çıktı klasörü
+    if (is.null(out_tag)) {
+      out_tag <- if (exists("out_tag", inherits = TRUE)) get("out_tag", inherits = TRUE)
+      else format(Sys.time(), "%Y%m%d_%H%M%S")
+    }
+    ppi_dir <- file.path(root_dir, "results", "ppi", out_tag)
+    dir.create(ppi_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    # --- 1) STRING ID eşleme
+    db      <- STRINGdb::STRINGdb$new(version = "11.5", species = 9606, score_threshold = 400)
+    key_col <- if ("ENTREZID" %in% names(deg_tbl)) "ENTREZID" else "SYMBOL"
+    
+    # Orijinal anahtarlar (rapor için kapsama)
+    keys_all <- unique(as.character(deg_tbl[[key_col]]))
+    
+    deg_map <- db$map(deg_tbl, key_col, removeUnmappedRows = TRUE)
+    if (!nrow(deg_map)) { message("STRING: eşleşen kayıt yok."); return(invisible(NULL)) }
+    
+    # --- 2) Etkileşimleri çek
+    ppi_edges <- db$get_interactions(unique(deg_map$STRING_id))
+    if (is.null(ppi_edges) || !nrow(ppi_edges)) { message("STRING: kenar bulunamadı."); return(invisible(NULL)) }
+    
+    # --- 3) Kenar isimlerini normalize et (protein1/protein2)
+    nm <- names(ppi_edges)
+    if (all(c("from","to") %in% nm)) {
+      ppi_edges$protein1 <- ppi_edges$from;              ppi_edges$protein2 <- ppi_edges$to
+    } else if (all(c("preferredName_A","preferredName_B") %in% nm)) {
+      ppi_edges$protein1 <- ppi_edges$preferredName_A;   ppi_edges$protein2 <- ppi_edges$preferredName_B
+    } else if (!all(c("protein1","protein2") %in% nm)) {
+      stop("STRING kenar kolonları beklenenden farklı: ", paste(nm, collapse = ", "))
+    }
+    
+    # Skor filtresi
+    if ("combined_score" %in% names(ppi_edges))
+      ppi_edges <- subset(ppi_edges, combined_score >= score_min)
+    
+    # Self-loop, NA temizliği ve yönsüz tekilleştirme
+    ppi_edges <- ppi_edges[!is.na(ppi_edges$protein1) & !is.na(ppi_edges$protein2), ]
+    u <- pmin(ppi_edges$protein1, ppi_edges$protein2)
+    v <- pmax(ppi_edges$protein1, ppi_edges$protein2)
+    extra_cols <- setdiff(names(ppi_edges), c("from","to","preferredName_A","preferredName_B","protein1","protein2"))
+    ppi_edges <- unique(data.frame(protein1 = u, protein2 = v, ppi_edges[, extra_cols, drop = FALSE]))
+    
+    # --- 4) ID -> SYMBOL / logFC haritası
+    id2sym <- unique(deg_map[, c("STRING_id","SYMBOL","logFC")])
+    
+    # --- 5) Grafı kur ve en büyük komponenti al
+    g <- igraph::graph_from_data_frame(ppi_edges[, c("protein1","protein2")], directed = FALSE)
+    if (igraph::vcount(g) == 0 || igraph::ecount(g) == 0) { message("Graf boş."); return(invisible(NULL)) }
+    
+    comps <- igraph::components(g)
+    g <- igraph::induced_subgraph(g, which(comps$membership == which.max(comps$csize)))
+    
+    # Düğüm öznitelikleri
+    igraph::V(g)$SYMBOL <- id2sym$SYMBOL[match(igraph::V(g)$name, id2sym$STRING_id)]
+    igraph::V(g)$logFC  <- id2sym$logFC [match(igraph::V(g)$name, id2sym$STRING_id)]
+    dir_vec <- ifelse(is.na(igraph::V(g)$logFC), NA,
+                      ifelse(igraph::V(g)$logFC > 0, "Up", "Down"))
+    igraph::V(g)$dir <- factor(ifelse(is.na(dir_vec), "Missing", dir_vec),
+                               levels = c("Down","Up","Missing"))
+    
+    # --- 6) Sadeleştirme: top_nodes ve hub etiketleri
+    deg_all <- igraph::degree(g)
+    keep    <- names(sort(deg_all, decreasing = TRUE))[seq_len(min(top_nodes, length(deg_all)))]
+    g2      <- igraph::induced_subgraph(g, keep)
+    
+    deg2  <- igraph::degree(g2)
+    hubs  <- names(sort(deg2, decreasing = TRUE))[seq_len(min(label_top_n, length(deg2)))]
+    igraph::V(g2)$label  <- ifelse(names(igraph::V(g2)) %in% hubs, igraph::V(g2)$SYMBOL, NA)
+    igraph::V(g2)$degree <- deg2
+    
+    # --- 7) Node/edge tabloları (rapor için)
+    nodes_out <- data.frame(
+      STRING_id = names(igraph::V(g2)),
+      SYMBOL    = igraph::V(g2)$SYMBOL,
+      logFC     = igraph::V(g2)$logFC,
+      degree    = igraph::V(g2)$degree,
+      dir       = igraph::V(g2)$dir,
+      stringsAsFactors = FALSE
+    )
+    edges_out <- igraph::as_data_frame(g2, what = "edges")
+    
+    # Kenar kalınlığı: combined_score eşleştir
+    e_key <- paste(pmin(edges_out$from, edges_out$to), pmax(edges_out$from, edges_out$to))
+    p_key <- paste(pmin(ppi_edges$protein1, ppi_edges$protein2), pmax(ppi_edges$protein1, ppi_edges$protein2))
+    w <- ppi_edges$combined_score[match(e_key, p_key)]
+    w[is.na(w)] <- score_min
+    igraph::E(g2)$w <- scales::rescale(w, to = c(0.2, 1.5))
+    
+    # --- 8) Görselleştirme (PNG)
+    set.seed(42)
+    lay <- igraph::layout_with_fr(g2)
+    p <- ggraph::ggraph(g2, layout = lay) +
+      ggraph::geom_edge_link(alpha = 0.3, show.legend = FALSE) +
+      ggraph::geom_node_point(aes(shape = dir, size = degree)) +
+      ggraph::geom_node_text(aes(label = label), repel = TRUE, size = 3) +
+      ggplot2::scale_shape_manual(values = c(Down = 25, Up = 24, Missing = 4)) +
+      ggplot2::scale_size_continuous(range = c(2, 7)) +
+      ggplot2::theme_void()
+    
+    ggplot2::ggsave(file.path(ppi_dir, "ppi_network_filtered.png"), p, width = 9, height = 7, dpi = 300)
+    
+    # --- 9) Çıktıları yaz
+    utils::write.csv(ppi_edges, file.path(ppi_dir, "ppi_edges_full.csv"),    row.names = FALSE)
+    utils::write.csv(nodes_out, file.path(ppi_dir, "ppi_nodes_filtered.csv"),row.names = FALSE)
+    utils::write.csv(edges_out, file.path(ppi_dir, "ppi_edges_filtered.csv"),row.names = FALSE)
+    
+    # Kapsama ve unmapped listesi
+    unmapped <- setdiff(keys_all, unique(as.character(deg_map[[key_col]])))
+    if (length(unmapped))
+      writeLines(as.character(unmapped), file.path(ppi_dir, "_UNMAPPED_KEYS.txt"))
+    
+    # --- 10) Özet mesaj ve dönen nesne
+    msg <- sprintf("STRING mapped: %d/%d | edges(full): %d | nodes(filtered): %d | edges(filtered): %d",
+                   nrow(deg_map), length(keys_all), nrow(ppi_edges),
+                   igraph::vcount(g2), igraph::ecount(g2))
+    message(msg)
+    
+    invisible(list(
+      graph       = g2,
+      nodes       = nodes_out,
+      edges       = edges_out,
+      mapped_n    = nrow(deg_map),
+      total_n     = length(keys_all),
+      score_range = if ("combined_score" %in% names(ppi_edges)) range(ppi_edges$combined_score, na.rm = TRUE) else NA,
+      out_dir     = ppi_dir,
+      summary     = msg
+    ))
   }
-  # self-loop ve duplikatlar
-  ppi_edges <- subset(ppi_edges, protein1 != protein2)
-  ppi_edges$u <- pmin(ppi_edges$protein1, ppi_edges$protein2)
-  ppi_edges$v <- pmax(ppi_edges$protein1, ppi_edges$protein2)
-  ppi_edges <- unique(ppi_edges[, c("u","v", setdiff(names(ppi_edges), c("protein1","protein2","u","v")))])
-  names(ppi_edges)[1:2] <- c("protein1","protein2")
+
   
-  # 4) ID → SYMBOL eşleme (etiketler için)
-  id2sym <- unique(deg_map[, c("STRING_id","SYMBOL","logFC")])
-  ppi_edges$SYMBOL1 <- id2sym$SYMBOL[match(ppi_edges$protein1, id2sym$STRING_id)]
-  ppi_edges$SYMBOL2 <- id2sym$SYMBOL[match(ppi_edges$protein2, id2sym$STRING_id)]
   
-  # 5) Grafik için graph objesi
-  g <- igraph::graph_from_data_frame(ppi_edges[, c("protein1","protein2")], directed = FALSE)
-  if (igraph::ecount(g) == 0) { message("Graf boş."); return(invisible(NULL)) }
+  deg_for_ppi <- if (exists("melas_res") && !is.null(melas_res$deg_noM_sig)) melas_res$deg_noM_sig else deg
   
-  # En büyük bağlı komponent
-  comps <- igraph::components(g)
-  g <- igraph::induced_subgraph(g, which(comps$membership == which.max(comps$csize)))
+  ppi <- run_string_ppi_smart(
+    deg_tbl    = deg_for_ppi,
+    root_dir   = root_dir,
+    score_min  = 700,
+    top_nodes  = 200,
+    label_top_n= 20,
+    out_tag    = if (exists("out_tag")) out_tag else "run"
+  )
+
   
-  # Düğüm meta: SYMBOL ve logFC
-  V(g)$SYMBOL <- id2sym$SYMBOL[match(names(V(g)), id2sym$STRING_id)]
-  V(g)$logFC  <- id2sym$logFC [match(names(V(g)), id2sym$STRING_id)]
-  V(g)$dir    <- ifelse(is.na(V(g)$logFC), "NA",
-                        ifelse(V(g)$logFC > 0, "Up", "Down"))
   
-  # En yoğun top_nodes'a indirgeme
-  degv <- igraph::degree(g)
-  keep <- names(sort(degv, decreasing = TRUE))[seq_len(min(top_nodes, length(degv)))]
-  g2   <- igraph::induced_subgraph(g, keep)
   
-  # Hub etiketleri
-  degv2 <- igraph::degree(g2)
-  hubs  <- names(sort(degv2, decreasing = TRUE))[seq_len(min(label_top_n, length(degv2)))]
-  V(g2)$label <- ifelse(names(V(g2)) %in% hubs, V(g2)$SYMBOL, NA)
   
-  # Kenarlara skor (kalınlık) ekle
-  e_df <- igraph::as_data_frame(g2, what = "edges")
-  e_key <- paste(ppi_edges$protein1, ppi_edges$protein2)
-  w     <- ppi_edges$combined_score[match(paste(e_df$from, e_df$to), e_key)]
-  igraph::E(g2)$w <- scales::rescale(w %||% 700, to = c(0.2, 1.5))
+  # 3.1 Kapsama ve yön dağılımı
+  cat(ppi$summary, "\n")
+  table_dir <- table(ppi$nodes$dir, useNA = "ifany"); print(table_dir)
   
-  # 6) Görselleştirme
-  set.seed(42)
-  lay <- igraph::layout_with_fr(g2)
-  plt <- ggraph::ggraph(g2, layout = lay) +
-    ggraph::geom_edge_link(aes(width = ..index..), alpha = 0.3, show.legend = FALSE) +
-    ggraph::geom_node_point(aes(shape = dir), size = 3) +
-    ggraph::geom_node_text(aes(label = label), repel = TRUE, size = 3) +
-    scale_shape_manual(values = c(Up = 16, Down = 1, NA = 4)) +
-    ggraph::theme_void()
+  # 3.2 İlk 15 hub (dereceye göre)
+  hub15 <- head(ppi$nodes[order(-ppi$nodes$degree), c("SYMBOL","degree","dir","logFC")], 15)
+  print(hub15, row.names = FALSE)
   
-  # 7) Çıktılar
-  dir.create(ppi_dir, showWarnings = FALSE, recursive = TRUE)
-  # tam tablo
-  write.csv(ppi_edges, file.path(ppi_dir, "ppi_edges_full.csv"), row.names = FALSE)
-  # filtreli düğüm/kenar tabloları
-  nodes_out <- data.frame(STRING_id = names(V(g2)),
-                          SYMBOL    = V(g2)$SYMBOL,
-                          logFC     = V(g2)$logFC,
-                          degree    = degv2,
-                          dir       = V(g2)$dir,
-                          stringsAsFactors = FALSE)
-  edges_out <- igraph::as_data_frame(g2, what = "edges")
-  write.csv(nodes_out, file.path(ppi_dir, "ppi_nodes_filtered.csv"), row.names = FALSE)
-  write.csv(edges_out, file.path(ppi_dir, "ppi_edges_filtered.csv"), row.names = FALSE)
-  ggsave(file.path(ppi_dir, "ppi_network_filtered.png"), plt, width = 9, height = 7, dpi = 300)
+  # 3.3 Skor aralığı ve dosya varlığı
+  print(ppi$score_range)
+  list.files(ppi$out_dir, pattern = "^ppi_", full.names = TRUE)
   
-  message("STRING mapped: ", nrow(deg_map), "/", nrow(deg_tbl),
-          " | edges(full): ", nrow(ppi_edges),
-          " | nodes(filtered): ", igraph::vcount(g2),
-          " | edges(filtered): ", igraph::ecount(g2))
-  invisible(list(graph = g2, nodes = nodes_out, edges = edges_out))
-}
+  # 3.4 (Opsiyonel) Yalnız DEG düğümlerinden altgraf
+  deg_only_ids <- with(ppi$nodes, STRING_id[dir %in% c("Up","Down")])
+  g_deg_only   <- igraph::induced_subgraph(ppi$graph, vids = igraph::V(ppi$graph)[name %in% deg_only_ids])
+  message("DEG-only graph: |V|=", igraph::vcount(g_deg_only), " |E|=", igraph::ecount(g_deg_only))
+  
+  
+  
+  
+  
+#***********************************************************************************  
 
-# ÇAĞRI:
-deg_for_ppi <- if (exists("melas_res") && !is.null(melas_res$deg_noM_sig)) melas_res$deg_noM_sig else deg
-run_string_ppi_smart(deg_for_ppi, root_dir, score_min = 700, top_nodes = 200, label_top_n = 20)
-
-nrow(tt_all)
-table("SYMBOL_is_NA" = is.na(tt_all$SYMBOL))
-mean(!is.na(tt_all$SYMBOL))  # kapsama oranı
-probes <- rownames(expr_cb)
-all(rownames(tt_all) %in% probes)
-
-head(AnnotationDbi::select(hgu133plus2.db,
-                           keys=head(probes, 5),
-                           columns=c("SYMBOL","GENENAME"),
-                           keytype="PROBEID"))
-
-
-####### OPSİYONEL ###########
-
-# tt_all senin tüm gen tablon
-#all_ids <- tt_all$SYMBOL[!is.na(tt_all$SYMBOL)]
-#mapped   <- string_db$get_aliases(all_ids)  # mevcut eşleşmeler
-#mapped_ids <- unique(mapped$preferred_name)
-
-#not_mapped <- setdiff(all_ids, mapped_ids)
-#length(not_mapped)        # kaç tanesi eşleşmedi?
-#head(not_mapped, 20)      # ilk 20’sini göster
-
-# toplam diferansiyel gen
-nrow(deg)
-
-# yukarı ve aşağı düzenlenen ayrı ayrı
-up_n   <- sum(deg$logFC > 0, na.rm=TRUE)
-down_n <- sum(deg$logFC < 0, na.rm=TRUE)
-
-cat("\n=== ÖZET ===\n")
-cat("Design boyutu: ", nrow(design), " örnek x ", ncol(design), " değişken\n", sep = "")
-cat("Toplam gen (probe-level): ", nrow(tt_all), "\n", sep = "")
-cat("Tekilleştirilmiş gen sayısı: ", nrow(tt_gene), "\n", sep = "")
-write.csv(deg,     file.path(root_dir,"results","deg", sprintf("DEG_FDR_lt_%s.csv", FDR_THRESH)), row.names = TRUE)
-cat("İlk 5 DEG:\n"); print(utils::head(deg[, c("SYMBOL","logFC","adj.P.Val","GENENAME")], 5))
-cat("Toplam DEG:", nrow(deg), "\n")
-cat("Up-regulated:", up_n, "\n")
-cat("Down-regulated:", down_n, "\n")
-
-
-######## OPSİYONEL #######
-# Kaç DEG STRING’de eşleşti?
-mapped_n <- nrow(deg_mapped); total_n <- nrow(deg_for_ppi)
-message("STRING mapped: ", mapped_n, "/", total_n)
-
-# Kaç kenar geldi, min skor?
-if (exists("ppi_edges")) {
-  message("PPI edges: ", nrow(ppi_edges))
-  if ("combined_score" %in% names(ppi_edges))
-    message("score range: ", range(ppi_edges$combined_score, na.rm=TRUE))
-}
-
-# PNG/CSV üretildi mi?
-print(file.exists(file.path(ppi_dir,"ppi_edges.csv")))
-print(file.exists(file.path(ppi_dir,"ppi_network.png")))
-
-de_sig <- deg             # FDR < FDR_THRESH gene-level
-expr_use <- expr_cb       # batch/SVA sonrası matris (grafikler için)
-
-if (!exists("deg")) {
-  p_thresh   <- get0("p_thresh",   ifnotfound = get0("FDR_THRESH",   ifnotfound = 0.05))
-  lfc_thresh <- get0("lfc_thresh", ifnotfound = get0("LOGFC_THRESH", ifnotfound = 1))
-  stopifnot(exists("tt_gene"))
-  deg <- subset(tt_gene, adj.P.Val < p_thresh & abs(logFC) >= lfc_thresh)
-}
-total_deg <- nrow(deg)
-up_deg    <- sum(deg$logFC > 0, na.rm = TRUE)
-down_deg  <- sum(deg$logFC < 0, na.rm = TRUE)
-cat("Toplam DEG:", total_deg, "| Up:", up_deg, "| Down:", down_deg, "\n")
-
-to_scalar_logical <- function(x) {
-  if (is.logical(x)) return(isTRUE(any(x, na.rm = TRUE)))
-  if (is.numeric(x)) return(isTRUE(any(x != 0, na.rm = TRUE)))
-  if (is.character(x)) {
-    y <- tolower(trimws(x))
-    return(isTRUE(any(y %in% c("1","true","t","yes","y"), na.rm = TRUE)))
+  
+  
+  
+  
+  # ==== HEATMAP ÖNCESİ GÜVENLİ HAZIRLIK (YAMA) ====
+  
+  # 0) Çizimde kullanılacak ifade matrisi (tercih sırası)
+  expr_plot <- get0("expr_plot",
+                    ifnotfound = get0("expr_use",
+                                      ifnotfound = get0("expr_cb",
+                                                        ifnotfound = get0("expr_f", ifnotfound = NULL))))
+  stopifnot(!is.null(expr_plot), is.matrix(expr_plot))
+  stopifnot(exists("pheno_aligned"), ncol(expr_plot) == nrow(pheno_aligned))
+  
+  # 1) tt_gene ile satır kimlikleri örtüşüyor mu? (prob düzeyi beklenir)
+  over_prob <- length(intersect(rownames(expr_plot), rownames(tt_gene))) > 0
+  
+  if (!over_prob) {
+    # expr_plot prob düzeyinde değilse: PROBEID -> SYMBOL toparla ve gene-level matrise çevir
+    stopifnot(requireNamespace("AnnotationDbi", quietly = TRUE),
+              requireNamespace("hgu133plus2.db", quietly = TRUE))
+    probe2sym <- AnnotationDbi::select(hgu133plus2.db,
+                                       keys = rownames(expr_plot),
+                                       columns = "SYMBOL", keytype = "PROBEID")
+    probe2sym <- probe2sym[!is.na(probe2sym$SYMBOL), ]
+    # gene-level (SYMBOL) topla
+    expr_plot <- rowsum(expr_plot[probe2sym$PROBEID, , drop = FALSE], probe2sym$SYMBOL)
+    message("Uyarı: expr_plot gene-level'e (SYMBOL) toparlandı; heatmap gene-level çizilecek.")
   }
-  FALSE
-}
-
-prepare_melas <- function(pheno, expr, results_dir = file.path(getwd(), "results")) {
-  ids <- colnames(expr)
-  if (!"filename" %in% names(pheno))
-    stop("pheno_aligned içinde 'filename' kolonu yok (GSM...CEL).")
   
-  idx <- match(ids, pheno$filename)
-  stopifnot(!any(is.na(idx)))
-  pheno <- pheno[idx, , drop = FALSE]
-  rownames(pheno) <- ids
+  # 2) Hızlı teşhis – ısı haritasında kullanacağın genlerden kaçının verisi var?
+  TOP_N <- min(50, nrow(deg))
+  chk_syms <- head(as.character(deg$SYMBOL[order(deg$adj.P.Val)]), TOP_N)
+  has_rows <- chk_syms %in% rownames(expr_plot)
+  message("Heatmap aday genler: ", sum(has_rows), "/", length(chk_syms), " expr_plot'ta mevcut.")
   
-  run_res <- run_deg_analysis(expr, pheno, run_melas = TRUE)
-  deg_cov    <- run_res$deg_cov
-  deg_cov_sig <- run_res$deg_cov_sig
-  deg_noM    <- run_res$deg_noM
-  deg_noM_sig <- run_res$deg_noM_sig
+  # 3) Klasör
+  plot_dir <- file.path(root_dir, "results", "plots")
+  dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+  # ==== /YAMA ====
   
-  dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
-  write.csv(deg_cov,  file.path(results_dir, "DE_all_covariate_MELAS_included.csv"))
-  write.csv(deg_noM,  file.path(results_dir, "DE_all_noMELAS.csv"))
-  write.csv(deg_cov_sig, file.path(results_dir,
-                                   sprintf("DE_sig_covariate_MELAS_included_FDR%s_LFC%s.csv",
-                                           FDR_THRESH, LOGFC_THRESH)))
-  write.csv(deg_noM_sig, file.path(results_dir,
-                                   sprintf("DE_sig_noMELAS_FDR%s_LFC%s.csv",
-                                           FDR_THRESH, LOGFC_THRESH)))
-  
-  list(pheno_aligned = pheno,
-       deg_cov = deg_cov, deg_cov_sig = deg_cov_sig,
-       deg_noM = deg_noM, deg_noM_sig = deg_noM_sig)
-}
-
-melas_flag <-
-  ( "is_melas" %in% names(pheno_aligned) && to_scalar_logical(pheno_aligned$is_melas) ) ||
-  ( "specialcase" %in% names(pheno_aligned) && to_scalar_logical(pheno_aligned$specialcase) )
-
-pheno_aligned$is_melas <- factor(ifelse(melas_flag, "Yes","No"), levels = c("No","Yes"))
-
-pheno_aligned$group <- factor(pheno_aligned$group, levels = c("Control","Pompe"))
-if ("age_at_baseline_mounth" %in% names(pheno_aligned))
-  pheno_aligned$age_at_baseline_mounth <- suppressWarnings(as.numeric(pheno_aligned$age_at_baseline_mounth))
-if ("sex" %in% names(pheno_aligned))
-  pheno_aligned$sex <- factor(pheno_aligned$sex)  # "M"/"F"
-if ("rin" %in% names(pheno_aligned))
-  pheno_aligned$rin <- suppressWarnings(as.numeric(pheno_aligned$rin))
-
-stopifnot(nrow(pheno_aligned) == ncol(expr_f))
-stopifnot(identical(rownames(pheno_aligned), colnames(expr_f)))
-
-run_deg_analysis <- function(expr, pheno, run_melas = FALSE,
-                             lfc_threshold = LOGFC_THRESH, fdr_threshold = FDR_THRESH) {
-  design_cov <- model.matrix(~0 + group + is_melas + age_at_baseline_mounth + sex + rin,
-                             data = pheno)
-  colnames(design_cov) <- make.names(colnames(design_cov))
-  fit_cov  <- limma::lmFit(expr, design_cov)
-  cont_cov <- limma::makeContrasts(Pompe - Control, levels = design_cov)
-  fit2_cov <- limma::eBayes(limma::contrasts.fit(fit_cov, cont_cov))
-  cov_res  <- limma::topTable(fit2_cov, coef = 1, number = Inf, adjust.method = "BH")
-  out <- list(deg_cov = cov_res,
-              deg_cov_sig = subset(cov_res, adj.P.Val < fdr_threshold & abs(logFC) >= lfc_threshold))
-  if (run_melas) {
-    keep_idx <- which(pheno$is_melas == "No")
-    expr_noM <- expr[, keep_idx, drop = FALSE]
-    ph_noM   <- droplevels(pheno[keep_idx, ])
-    ph_noM$group <- factor(ph_noM$group, levels = c("Control","Pompe"))
-    design_noM <- model.matrix(~0 + group + age_at_baseline_mounth + sex + rin, data = ph_noM)
-    colnames(design_noM) <- make.names(colnames(design_noM))
-    fit_noM  <- limma::lmFit(expr_noM, design_noM)
-    cont_noM <- limma::makeContrasts(Pompe - Control, levels = design_noM)
-    fit2_noM <- limma::eBayes(limma::contrasts.fit(fit_noM, cont_noM))
-    deg_noM    <- limma::topTable(fit2_noM, coef = 1, number = Inf, adjust.method = "BH")
-    out$deg_noM <- deg_noM
-    out$deg_noM_sig <- subset(deg_noM, adj.P.Val < fdr_threshold & abs(logFC) >= lfc_threshold)
-  }
-  out
-}
-
-plot_dir <- file.path(root_dir, "results", "plots")
-dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
-
-expr_plot <- if (exists("expr_use")) expr_use else if (exists("expr_cb")) expr_cb else expr_f  # batch/SVA sonrası
-stopifnot(ncol(expr_plot) == nrow(pheno_aligned))
-
-stopifnot(exists("tt_all"), exists("tt_gene"), exists("deg"))
-
-volc_main <- within(tt_all, {
-  negLog10FDR <- -log10(adj.P.Val)
-  sig <- adj.P.Val < FDR_THRESH
-  dir <- ifelse(sig & logFC > 0, "Up",
-                ifelse(sig & logFC < 0, "Down", "NS"))
-})
-
-lab_main <- head(volc_main[order(volc_main$adj.P.Val, -abs(volc_main$logFC)), ], 15)
-lab_main$SYMBOL[is.na(lab_main$SYMBOL) | lab_main$SYMBOL == ""] <- rownames(lab_main)[is.na(lab_main$SYMBOL) | lab_main$SYMBOL == ""]
-
-volc <- ggplot(volc_main, aes(x = logFC, y = negLog10FDR)) +
-  geom_point(aes(shape = dir), alpha = 0.6) +
-  geom_hline(yintercept = -log10(FDR_THRESH), linetype = 2) +
-  geom_vline(xintercept = c(-LOGFC_THRESH, LOGFC_THRESH), linetype = 3) +
-  ggrepel::geom_text_repel(
-    data = lab_main,
-    aes(label = SYMBOL),
-    size = 3, max.overlaps = 100
-  ) +
-  theme_bw(14) +
-  labs(title = "Volcano (Pompe vs Control) — Main",
-       x = "log2 Fold Change", y = "-log10(FDR)")
-ggsave(file.path(plot_dir, "volcano_main.png"), volc, width = 8, height = 6, dpi = 300)
-
-if (exists("tt_all_s") && exists("deg_sens")) {
-  volc_s <- within(tt_all_s, {
-    negLog10FDR <- -log10(adj.P.Val)
-    sig <- adj.P.Val < FDR_THRESH
-    dir <- ifelse(sig & logFC > 0, "Up",
-                  ifelse(sig & logFC < 0, "Down", "NS"))
-  })
-  lab_s <- head(volc_s[order(volc_s$adj.P.Val, -abs(volc_s$logFC)), ], 15)
-  lab_s$SYMBOL[is.na(lab_s$SYMBOL) | lab_s$SYMBOL == ""] <- rownames(lab_s)[is.na(lab_s$SYMBOL) | lab_s$SYMBOL == ""]
-  
-  p_s <- ggplot(volc_s, aes(x = logFC, y = negLog10FDR)) +
-    geom_point(aes(shape = dir), alpha = 0.6) +
-    geom_hline(yintercept = -log10(FDR_THRESH), linetype = 2) +
-    geom_vline(xintercept = c(-LOGFC_THRESH, LOGFC_THRESH), linetype = 3) +
-    ggrepel::geom_text_repel(
-      data = lab_s,
-      aes(label = SYMBOL),
-      size = 3, max.overlaps = 100
-    ) +
-    theme_bw(14) +
-    labs(title = "Volcano (Pompe vs Control) — MELAS excluded",
-         x = "log2 Fold Change", y = "-log10(FDR)")
-  ggsave(file.path(plot_dir, "volcano_noMELAS_main.png"), p_s, width = 8, height = 6, dpi = 300)
-}
-
-stopifnot(exists("tt_gene"), exists("deg"))
-stopifnot(nrow(deg) > 0)
-
 TOP_N <- min(50, nrow(deg))
 stopifnot(TOP_N >= 1)
 
@@ -711,17 +681,38 @@ if (length(ranks_kegg) >= 50) {
   print(dotplot(gsea_kegg, showCategory = 20))
   dev.off()
   
-  top_kegg <- gsea_kegg@result$ID[1]
-  if (!is.null(top_kegg) && !is.na(top_kegg)) {
-    pathview::pathview(gene.data = ranks_kegg, pathway.id = top_kegg,
-                       species = "hsa", out.suffix = "gsea",
-                       kegg.native = TRUE, out.dir = gsea_dir)
+  
+  
+  if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+  BiocManager::install("pathview")    # KEGG diyagramları için
+  
+  # (Kurulum sadece bir kere, konsolda)
+  # if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+  # BiocManager::install("pathview")
+  
+  if (!is.null(gsea_kegg) && nrow(as.data.frame(gsea_kegg)) > 0) {
+    top_kegg <- gsea_kegg@result$ID[1]
+    if (!is.null(top_kegg) && !is.na(top_kegg)) {
+      if (requireNamespace("pathview", quietly = TRUE)) {
+        stopifnot(is.numeric(ranks_kegg), !anyNA(names(ranks_kegg)))
+        pathview::pathview(gene.data = ranks_kegg, pathway.id = top_kegg,
+                           species = "hsa", out.suffix = "gsea",
+                           kegg.native = TRUE, out.dir = gsea_dir)
+      } else {
+        message("pathview yüklü değil → KEGG diyagramı atlandı. ",
+                "Kurmak için bir kez: BiocManager::install('pathview')")
+      }
+    }
   }
-} else {
-  message("KEGG GSEA atlandı: ENTREZ eşleşmesi az ( < 50 ).")
-}
+  # Üretilen dosyaları görmek için:
+  list.files(gsea_dir, pattern = "pathview|hsa|gsea", full.names = TRUE)
+  
 
 # Reactome pathway enrichment
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install("ReactomePA")   # tek seferlik
+
 entrez_deg <- sym2ent_1to1$ENTREZID[sym2ent_1to1$SYMBOL %in% deg$SYMBOL]
 reactome <- ReactomePA::enrichPathway(gene = entrez_deg,
                                       pvalueCutoff = FDR_THRESH,
