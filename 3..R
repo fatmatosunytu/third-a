@@ -680,7 +680,7 @@ if (length(ranks_kegg) >= 50) {
   png(file.path(gsea_dir, "GSEA_KEGG_dotplot.png"), width=1000, height=800, res=130)
   print(dotplot(gsea_kegg, showCategory = 20))
   dev.off()
-  
+ } 
   
   
   if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
@@ -1468,3 +1468,4 @@ if (exists("dgi") && nrow(dgi) && exists("cand_rev") && nrow(cand_rev)) {
   write.csv(pri, file.path(root_dir,"results","drug","drug_candidates_intersection.csv"), row.names = FALSE)
   message("Kesişim listesi yazıldı -> drug_candidates_intersection.csv (daha güçlü adaylar)")
 }
+
