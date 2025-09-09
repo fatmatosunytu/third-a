@@ -789,17 +789,7 @@ ggsave(file.path(out_dir, "QC_Panel_PCA_UMAP.png"), qc_panel,
        width = 12, height = 5.5, dpi = 300)
 
 
-
-
-
-
 ## 8) (Opsiyonel) multiMiR – validated hedefler
-# Eğer 'safe_multimir_table' tanımlı DEĞİLSE, aşağıdaki örnek çalışır:
-# suppressPackageStartupMessages(library(multiMiR))
-# universe_set <- unique(tt_gene$SYMBOL[!is.na(tt_gene$SYMBOL)])
-# universe_set <- unique(tt_gene$SYMBOL[tt_gene$adj.P.Val < 0.05])  # sadece DEGs için
-# mm <- multiMiR::get_multimir(org = "hsa", target = universe_set, table = "validated", summary = TRUE)
-# df <- multiMiR::multimir_results(mm)
 
 #ON KONTROL
 packageVersion("multiMiR")
@@ -904,20 +894,9 @@ cat("KEGG ENTREZ ranks:", length(eg_ranks), "\n")
 cat("Design boyutu: ", nrow(design), " örnek x ", ncol(design), " değişken\n", sep = "")
 cat("QC ve analiz blokları tamamlandı.\n")
 
-
-## ===========================================================
 ## E BLOĞU: Predicted miRNA–Hedef (TargetScan HARIÇ) + Görseller
 ## Yer: C (drop-in: limma+anotasyon+GSEA) sonrasında
 ## Girdi varsayımları: 'tt_gene' (SYMBOL, adj.P.Val) mevcut.
-## ===========================================================
-
-#suppressPackageStartupMessages({
-#  library(multiMiR)
-#  library(AnnotationDbi)
-#  library(org.Hs.eg.db)
-#  library(dplyr); library(stringr)
-#  library(ggplot2); library(igraph); library(ggraph); library(pheatmap)
-#})
 
 ## ---------- 0) SIG genleri güvenle hazırla ----------
 if (!exists("tt_gene")) {
@@ -968,7 +947,6 @@ extract_predicted_df <- function(mm) {
   stop("get_multimir çıktısı beklenen yapıda değil (data/predicted bulunamadı).")
 }
 
-## ---------- 2) TargetScan hariç predicted sorgu ----------
 ## ---------- 2) TargetScan hariç predicted sorgu (chunk ve timeout'lu) ----------
 get_predicted_no_targetscan_chunked <- function(target_vec,
                                                 chunk_size = 500,
@@ -1115,7 +1093,6 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     utils::write.csv(top_mirnas, file.path(plot_dir, "predicted_top_targeting_miRNAs.csv"), row.names = FALSE)
     
     ## ---------- 8) Alt-ag (top-30 gen & top-30 miRNA) ----------
-    ## ---------- 8) Alt-ağ (top-30 gen & top-30 miRNA) ----------
     suppressPackageStartupMessages({ library(ggraph); library(igraph); library(ggplot2) })
     
     top_genes_vec  <- utils::head(gene_freq$Gene, min(30, nrow(gene_freq)))
@@ -1129,40 +1106,46 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     colnames(edges_sub) <- c("Gene", "miRNA")
     edges_sub <- unique(stats::na.omit(edges_sub))
     
-    if (nrow(edges_sub) >= 2) {
+if (nrow(edges_sub) >= 2) {
       set.seed(42)
       g <- igraph::graph_from_data_frame(edges_sub, directed = FALSE)
       if (is.null(igraph::V(g)$name)) igraph::V(g)$name <- seq_len(igraph::vcount(g))
       
-      p_net <- ggraph::ggraph(g, layout = "fr") +
-        ggraph::geom_edge_link(alpha = 0.4) +
-        ggraph::geom_node_point(size = 3) +
-        ggraph::geom_node_text(aes(label = name), repel = TRUE, size = 2.8) +
-        ggplot2::labs(title = "Predicted miRNA–Gen Bağlantı Ağı (alt küme)") +
-        ggplot2::theme_void(base_size = 14)
+      # Tanı: alt ağda kaç kenar var?
+      message("edges_sub satır: ", nrow(edges_sub))
       
-      print(p_net)   # <-- DOĞRU kullanım
-      
-      # Kaydet (PNG ve PDF)
-if (!dir.exists(plot_dir)) dir.create(plot_dir, recursive = TRUE)
-    out_png <- file.path(plot_dir, "predicted_miRNA_gene_network.png")
-      ggplot2::ggsave(out_png, p_net, width = 10, height = 8, dpi = 300)
-      
-      out_pdf <- file.path(plot_dir, "predicted_miRNA_gene_network.pdf")
-      pdf(file = out_pdf, width = 10, height = 8)
-      print(p_net)
-      dev.off()
-      
-      # Kenar tablosu
-      utils::write.csv(
-        edges_sub,
-        file = file.path(plot_dir, "predicted_network_edges_subset.csv"),
-        row.names = FALSE
-      )
-    } else {
-      message("Ağ çizmek için kenar sayısı yetersiz (nrow(edges_sub) < 2).")
-    }
-    
+      p_net <- NULL
+      if (nrow(edges_sub) >= 2) {
+        # 0) Güvenlik: önceki 'g' karakter vektörünü bozmayalım
+        # rm(g)  # isterseniz tamamen temizleyin; yoksa bırakın
+        
+        # 1) igraph grafiğini OLUŞTUR (yeni isimle)
+        set.seed(42)
+        g_net <- igraph::graph_from_data_frame(edges_sub, directed = FALSE)
+        stopifnot(inherits(g_net, "igraph"))
+        
+        # 2) tepe isimleri varsa/ yoksa
+        if (is.null(igraph::V(g_net)$name)) {
+          igraph::V(g_net)$name <- seq_len(igraph::vcount(g_net))
+        }
+        
+        # 3) ggraph ile çizim
+        p_net <- ggraph::ggraph(g_net, layout = "fr") +
+          ggraph::geom_edge_link(alpha = 0.4) +
+          ggraph::geom_node_point(size = 3) +
+          ggraph::geom_node_text(ggplot2::aes(label = name), repel = TRUE, size = 2.8) +
+          ggplot2::labs(title = "Predicted miRNA–Gen Bağlantı Ağı (alt küme)") +
+          ggplot2::theme_void(base_size = 14)
+        
+        print(p_net)
+        
+        # 4) Kaydet
+        dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+        ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.png"),
+                        p_net, width = 10, height = 8, dpi = 300)
+        ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.pdf"),
+                        p_net, width = 10, height = 8, device = cairo_pdf)
+        
     
     ## ---------- 9) Isı haritası (top-20x20) ----------
     suppressPackageStartupMessages(library(pheatmap))
@@ -1182,11 +1165,9 @@ if (!dir.exists(plot_dir)) dir.create(plot_dir, recursive = TRUE)
       )
     }
   }
+ }
 }
-
 message(">> Predicted (TargetScan hariç) miRNA–hedef bloğu tamamlandı.")
-
-
 
 #DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
 
