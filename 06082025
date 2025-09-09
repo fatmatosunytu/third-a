@@ -364,11 +364,30 @@ term2gene <- msigdbr(species = "Homo sapiens", category = "H") %>%
 common <- intersect(names(ranks), term2gene$gene)
 if (length(common) < 50) warning("GSEA için ortak gen sayısı düşük: ", length(common))
 
-gsea_h <- clusterProfiler::GSEA(
-  geneList  = ranks[common],
-  TERM2GENE = term2gene[term2gene$gene %in% common, ],
+
+# 1) Rank vektörü: t-İstatistiğine göre (abs(t) DEĞİL!)
+ranks_s <- tt_gene_s |>
+  dplyr::filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) |>
+  dplyr::mutate(SYMBOL = toupper(SYMBOL)) |>
+  dplyr::distinct(SYMBOL, .keep_all = TRUE) |>
+  dplyr::arrange(dplyr::desc(t)) |>
+  { setNames(.$t, .$SYMBOL) }
+
+# 2) Gen setlerinde olanları al + SIRALA
+genes_in_sets <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
+geneList <- ranks_s[genes_in_sets]
+geneList <- sort(geneList, decreasing = TRUE)   # ← GSEA beklentisi
+
+# 3) TERM2GENE’yi de aynı evrene indir
+t2g <- term2gene[term2gene$gene %in% names(geneList), ]
+
+# 4) GSEA
+gsea_h_s <- clusterProfiler::GSEA(
+  geneList  = geneList,
+  TERM2GENE = t2g,
   verbose   = FALSE
 )
+
 
 ## 5) KEGG GSEA (ENTREZ)
 ## 5) KEGG GSEA (ENTREZ) — SAĞLAM BLOK
@@ -379,7 +398,7 @@ suppressPackageStartupMessages({
   library(clusterProfiler)
 })
 
-#0tt_gene yoksa, tt ve anotasyonla üret
+ #0tt_gene yoksa, tt ve anotasyonla üret
 
 if (!exists("tt_gene")) {
   stopifnot(exists("tt"), nrow(tt) > 0)
@@ -428,45 +447,292 @@ if (!is.null(gse_kegg) && nrow(as.data.frame(gse_kegg)) > 0) {
 }
 
 ## 6) QC – PCA & UMAP (kanonik matrisle)
-pca_df <- data.frame(
-  PC1 = prcomp(t(expr_mat), scale. = TRUE)$x[,1],
-  PC2 = prcomp(t(expr_mat), scale. = TRUE)$x[,2],
-  Group = pheno_aligned$group,
-  Sample = rownames(pheno_aligned)
-)
+#pca_df <- data.frame(
+#  PC1 = prcomp(t(expr_mat), scale. = TRUE)$x[,1],
+#  PC2 = prcomp(t(expr_mat), scale. = TRUE)$x[,2],
+#  Group = pheno_aligned$group,
+#  Sample = rownames(pheno_aligned)
+#)
 
-p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group, label = Sample)) +
-  geom_point(size = 2) + theme_bw(base_size = 14) +
-  labs(title = "PCA – Kanonik ifade (RMA ± ComBat)")
+#p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group, label = Sample)) +
+#  geom_point(size = 2) + theme_bw(base_size = 14) +
+#  labs(title = "PCA – Kanonik ifade (RMA ± ComBat)")
 
-um <- umap::umap(t(expr_mat), n_neighbors = 8, random_state = 123)
-ump_df <- data.frame(
-  Sample = colnames(expr_mat),
-  UMAP1  = um$layout[,1],
-  UMAP2  = um$layout[,2]
-)
-ump_df$Group <- pheno_aligned$group[match(ump_df$Sample, rownames(pheno_aligned))]
+#um <- umap::umap(t(expr_mat), n_neighbors = 8, random_state = 123)
+#ump_df <- data.frame(
+#  Sample = colnames(expr_mat),
+#  UMAP1  = um$layout[,1],
+#  UMAP2  = um$layout[,2]
+#)
+#ump_df$Group <- pheno_aligned$group[match(ump_df$Sample, rownames(pheno_aligned))]
 
-p_umap <- ggplot(ump_df, aes(UMAP1, UMAP2, color = Group, label = Sample)) +
-  geom_point(size = 2) + theme_minimal(base_size = 13) +
-  labs(title = "UMAP – Kanonik ifade (RMA ± ComBat)")
+#p_umap <- ggplot(ump_df, aes(UMAP1, UMAP2, color = Group, label = Sample)) +
+#  geom_point(size = 2) + theme_minimal(base_size = 13) +
+#  labs(title = "UMAP – Kanonik ifade (RMA ± ComBat)")
 
 ## 7) (Opsiyonel) no-MELAS GSEA
-if (exists("tt_gene_s")) {
+
+#ONKONTROL
+#Eğer burada isimler farklıysa (ör. “Non.MELAS”, “Pompe” gibi), makeContrasts(Pompe - Control, …) kısmını tasarımdaki gerçek kolon adlarına göre değiştir
+# 1) Aynı örnek sırası:
+stopifnot(identical(colnames(expr_s), rownames(ph_s)))
+
+# 2) Grup faktörü ve tasarım:
+ph_s$group <- factor(ph_s$group, levels = c("Control","Pompe"))
+design_s <- model.matrix(~0 + group, data = ph_s)
+colnames(design_s)            # --> "Control"  "Pompe" görmelisin
+
+
+## ==== no-MELAS için limma → prob düzeyi → gen düzeyi (tt_gene_s) ====
+#Eğer term2gene ile kesişim düşük gelirse eşik değerini (≥50) 20–30’a çekebilirsin. 
+## ===== 7) (Opsiyonel) no-MELAS GSEA — DÜZELTİLMİŞ =====
+suppressPackageStartupMessages({ library(dplyr); library(clusterProfiler); library(enrichplot) })
+
+if (exists("tt_gene_s") && exists("term2gene")) {
+  
+  # 0) Term2gene gen isimlerini de büyük harfe çek (ranks ile aynı evren)
+  term2gene <- term2gene %>% mutate(gene = toupper(gene))
+  
+  # 1) Rank vektörü (işaretli sıralama: abs(t) DEĞİL)
+  ranks_s <- tt_gene_s %>%
+    filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
+    mutate(SYMBOL = toupper(SYMBOL), t = as.numeric(t)) %>%
+    distinct(SYMBOL, .keep_all = TRUE) %>%
+    arrange(desc(t)) %>%
+    { setNames(.$t, .$SYMBOL) }
+  
+  # 2) Sadece gen setlerinde olanları al + AZALAN sırayı koru
+  genes_in_sets <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
+  geneList <- ranks_s[genes_in_sets]
+  geneList <- sort(geneList, decreasing = TRUE)
+  
+  # (güvenlik kontrolü)
+  stopifnot(is.numeric(geneList), length(geneList) >= 20, all(diff(unname(geneList)) <= 0))
+  
+  # 3) TERM2GENE’yi aynı evrene indir
+  t2g <- term2gene[term2gene$gene %in% names(geneList), c("term","gene")]
+  
+  # 4) GSEA
+  gsea_h_s <- clusterProfiler::GSEA(
+    geneList  = geneList,
+    TERM2GENE = t2g,
+    minGSSize = 10,          # istersen artır
+    verbose   = FALSE
+  )
+  
+  # 5) Görsel (varsa kaydet)
+  if (nrow(as.data.frame(gsea_h_s)) > 0) {
+    p_gsea_dot <- enrichplot::dotplot(gsea_h_s, showCategory = 20) +
+      labs(title = "no-MELAS GSEA — Dotplot")
+    print(p_gsea_dot)
+    if (exists("out_dir")) {
+      ggsave(file.path(out_dir, "GSEA_noMELAS_dotplot.png"),
+             p_gsea_dot, width = 7, height = 5.5, dpi = 300)
+    }
+  } else {
+    message("GSEA: anlamlı yolak çıkmadı (p.adj eşiğini/süreç evrenini kontrol et).")
+  }
+  
+} else {
+  message("GSEA atlandı: 'tt_gene_s' veya 'term2gene' yok.")
+}
+
+# (İsteğe bağlı) diske yaz
+out_dir <- get0("out_dir", ifnotfound = file.path(getwd(), "results", "deg"))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write.csv(tt_gene_s, file.path(out_dir, "tt_gene_noMELAS_gene_level.csv"), row.names = FALSE)
+
+# Hızlı kontrol
+cat("no-MELAS tt_gene_s hazır. Gen sayısı:", nrow(tt_gene_s), "\n")
+
+
+#if (exists("tt_gene_s")) {
+
+#  ranks_s <- tt_gene_s %>%
+#    filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
+#    mutate(SYMBOL = toupper(SYMBOL)) %>%
+#    arrange(desc(abs(t))) %>%            # tekilleştirme yapılmışsa gerekmez
+#    { setNames(.$t, .$SYMBOL) }
+#  if (length(ranks_s) >= 50) {
+#    common_s <- intersect(names(ranks_s), term2gene$gene)
+#    gsea_h_s <- clusterProfiler::GSEA(
+#      geneList  = ranks_s[common_s],
+#      TERM2GENE = term2gene[term2gene$gene %in% common_s, ],
+#      verbose   = FALSE
+#    )
+#  } else message("no-MELAS GSEA atlandı: yeterli rank yok.")
+#}
+
+
+
+
+## ====== 0) Kurulum ve kontroller ======
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(ggrepel)
+  library(umap)
+  library(clusterProfiler)
+  library(enrichplot)
+  library(cowplot)  # plot_grid
+})
+
+stopifnot(is.matrix(expr_mat), !is.null(colnames(expr_mat)))
+stopifnot(exists("pheno_aligned"), is.data.frame(pheno_aligned))
+stopifnot(identical(colnames(expr_mat), rownames(pheno_aligned)))
+
+# Çıktı klasörü
+out_dir <- file.path(getwd(), "results", "QC_GSEA")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ====== 1) PCA (örnek-temelli; kolonlar örnek) ======
+set.seed(123)
+pca_obj <- prcomp(t(expr_mat), scale. = TRUE, center = TRUE)
+
+# Açıklanan varyans
+var_exp <- (pca_obj$sdev^2) / sum(pca_obj$sdev^2)
+pc1_var <- round(100 * var_exp[1], 1)
+pc2_var <- round(100 * var_exp[2], 1)
+
+pca_df <- data.frame(
+  PC1    = pca_obj$x[, 1],
+  PC2    = pca_obj$x[, 2],
+  Group  = pheno_aligned$group,
+  Sample = rownames(pheno_aligned),
+  check.names = FALSE
+)
+
+p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group)) +
+  stat_ellipse(type = "norm", linewidth = 0.5, alpha = 0.3, show.legend = FALSE) +
+  geom_point(size = 2.2, alpha = 0.9) +
+  # Etiketleri aç/kapat: aşağıdaki satırı yorumdan çıkarın
+  # PCA etiketi
+  ggrepel::geom_text_repel(aes(label = Sample), size = 3,
+                                            max.overlaps = Inf, show.legend = FALSE) +
+
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA — Kanonik ifade (RMA ± ComBat)",
+    x = sprintf("PC1 (%.1f%%)", pc1_var),
+    y = sprintf("PC2 (%.1f%%)", pc2_var),
+    caption = "Örnekler kolon, gen/problar satır varsayımıyla t(expr_mat) kullanıldı."
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+print(p_pca)
+
+## ====== 2) UMAP ======
+# Not: umap::umap girdisi satırlar = gözlem, sütunlar = özellik
+set.seed(123)
+um <- umap(t(expr_mat), n_neighbors = 8, random_state = 123, metric = "euclidean")
+um_df <- data.frame(
+  Sample = colnames(expr_mat),
+  UMAP1  = um$layout[, 1],
+  UMAP2  = um$layout[, 2],
+  Group  = pheno_aligned$group[match(colnames(expr_mat), rownames(pheno_aligned))],
+  check.names = FALSE
+)
+
+p_umap <- ggplot(um_df, aes(UMAP1, UMAP2, color = Group)) +
+  stat_ellipse(type = "norm", linewidth = 0.5, alpha = 0.3, show.legend = FALSE) +
+  geom_point(size = 2.2, alpha = 0.9) +
+  # Etiketleri aç/kapat: aşağıdaki satırı yorumdan çıkarın
+# UMAP etiketi
+ggrepel::geom_text_repel(aes(label = Sample), size = 3,
+                                            max.overlaps = Inf, show.legend = FALSE) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "UMAP — Kanonik ifade (RMA ± ComBat)",
+    caption = "n_neighbors=8; Öneri: Küçük n için 5–15 arasında duyarlılık analizi yapın."
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+## ====== 3) Kaydet (PNG + PDF) ======
+ggsave(file.path(out_dir, "QC_PCA.png"),  p_pca, width = 6.5, height = 5.2, dpi = 300)
+ggsave(file.path(out_dir, "QC_PCA.pdf"),  p_pca, width = 6.5, height = 5.2)
+
+ggsave(file.path(out_dir, "QC_UMAP.png"), p_umap, width = 6.5, height = 5.2, dpi = 300)
+ggsave(file.path(out_dir, "QC_UMAP.pdf"), p_umap, width = 6.5, height = 5.2)
+
+## ====== 4) (Opsiyonel) no-MELAS GSEA ======
+# Beklenenler:
+# - tt_gene_s: en azından kolonları "SYMBOL" ve "t" içeren tablo (no-MELAS karşılaştırması)
+# - term2gene: data.frame( term = ..., gene = ... ) yapısında kullanıcı tanımlı gen seti haritası
+p_gsea_dot <- p_gsea_le <- NULL
+
+if (exists("tt_gene_s") && is.data.frame(tt_gene_s) &&
+    all(c("SYMBOL","t") %in% names(tt_gene_s)) &&
+    exists("term2gene") && is.data.frame(term2gene) &&
+    all(c("term","gene") %in% names(term2gene))) {
+  
   ranks_s <- tt_gene_s %>%
     filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
     mutate(SYMBOL = toupper(SYMBOL)) %>%
-    arrange(desc(abs(t))) %>%            # tekilleştirme yapılmışsa gerekmez
+    arrange(desc(abs(t))) %>%
     { setNames(.$t, .$SYMBOL) }
-  if (length(ranks_s) >= 50) {
-    common_s <- intersect(names(ranks_s), term2gene$gene)
-    gsea_h_s <- clusterProfiler::GSEA(
-      geneList  = ranks_s[common_s],
-      TERM2GENE = term2gene[term2gene$gene %in% common_s, ],
+  
+  # En az 50 gen isabeti olsun
+  common_s <- intersect(names(ranks_s), term2gene$gene)
+  
+  if (length(common_s) >= 50) {
+    set.seed(123)
+    gsea_h_s <- GSEA(
+      geneList  = geneList,
+      TERM2GENE = t2g,
+      pvalueCutoff = 1,     # rapor amaçlı üst sınır; daha sonra filtreleyebilirsiniz
       verbose   = FALSE
     )
-  } else message("no-MELAS GSEA atlandı: yeterli rank yok.")
+    
+    # Sonuç varsa görselleştir
+    if (nrow(as.data.frame(gsea_h_s)) > 0) {
+      # 4a) Dotplot (ilk 20 yolak)
+      p_gsea_dot <- dotplot(gsea_h_s, showCategory = 20, split = NULL) +
+        theme_bw(base_size = 12) +
+        labs(title = "no-MELAS GSEA — Enriched Pathways (Dotplot)")
+      
+      # 4b) En iyi yolak için leading-edge eğrisi
+      top_id <- gsea_h_s@result %>%
+        arrange(p.adjust) %>%
+        slice(1) %>% pull(ID)
+      
+      if (length(top_id) == 1 && !is.na(top_id)) {
+        p_gsea_le <- gseaplot2(gsea_h_s, geneSetID = top_id, pvalue_table = TRUE) +
+          labs(title = paste0("Leading-edge — ", top_id))
+      }
+      
+      # Kaydet
+      if (!is.null(p_gsea_dot))
+        ggsave(file.path(out_dir, "GSEA_noMELAS_Dotplot.png"), p_gsea_dot,
+               width = 7, height = 5.5, dpi = 300)
+      if (!is.null(p_gsea_le))
+        ggsave(file.path(out_dir, "GSEA_noMELAS_LeadingEdge.png"), p_gsea_le,
+               width = 7, height = 5.5, dpi = 300)
+      
+      # Rapor için kombine görsel
+      if (!is.null(p_gsea_dot) && !is.null(p_gsea_le)) {
+        combo <- plot_grid(p_gsea_dot, p_gsea_le, ncol = 2, rel_widths = c(1, 1.2))
+        ggsave(file.path(out_dir, "GSEA_noMELAS_Combined.png"), combo,
+               width = 12, height = 5.5, dpi = 300)
+      }
+    } else {
+      message("GSEA: anlamlı yolak bulunamadı (p.adj filtrelerine bakınız).")
+    }
+  } else {
+    message("no-MELAS GSEA atlandı: ortak rütbe >= 50 koşulu sağlanmadı.")
+  }
+} else {
+  message("GSEA atlandı: 'tt_gene_s' (SYMBOL,t) ve/veya 'term2gene'(term,gene) bulunamadı.")
 }
+
+## ====== 5) QC özet panelini de almak isterseniz ======
+qc_panel <- plot_grid(p_pca, p_umap, ncol = 2)
+ggsave(file.path(out_dir, "QC_Panel_PCA_UMAP.png"), qc_panel,
+       width = 12, height = 5.5, dpi = 300)
+
+
+
+
+
 
 ## 8) (Opsiyonel) multiMiR – validated hedefler
 # Eğer 'safe_multimir_table' tanımlı DEĞİLSE, aşağıdaki örnek çalışır:
