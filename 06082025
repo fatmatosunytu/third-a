@@ -365,28 +365,87 @@ common <- intersect(names(ranks), term2gene$gene)
 if (length(common) < 50) warning("GSEA için ortak gen sayısı düşük: ", length(common))
 
 
-# 1) Rank vektörü: t-İstatistiğine göre (abs(t) DEĞİL!)
-ranks_s <- tt_gene_s |>
-  dplyr::filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) |>
-  dplyr::mutate(SYMBOL = toupper(SYMBOL)) |>
-  dplyr::distinct(SYMBOL, .keep_all = TRUE) |>
-  dplyr::arrange(dplyr::desc(t)) |>
+# Rank vektörü: t-İstatistiğine göre (abs(t) DEĞİL!)
+## ==== Eksik nesneleri üret + no-MELAS GSEA çalıştır (tek blok) ====
+suppressPackageStartupMessages({
+  library(dplyr); library(limma); library(AnnotationDbi)
+  library(hgu133plus2.db)         # platformun farklıysa değiştir
+  library(msigdbr); library(clusterProfiler); library(enrichplot)
+})
+
+## 0) no-MELAS altkümesi hazır mı?
+stopifnot(exists("expr_s"), exists("ph_s"))
+stopifnot(identical(colnames(expr_s), rownames(ph_s)))
+ph_s$group <- droplevels(factor(ph_s$group, levels = c("Control","Pompe")))
+if (nlevels(ph_s$group) < 2) stop("no-MELAS altkümesinde iki grup yok.")
+
+## 1) tt_gene_s yoksa üret (limma → prob → gen)
+if (!exists("tt_gene_s")) {
+  design_s <- model.matrix(~0 + group, data = ph_s)
+  colnames(design_s) <- levels(ph_s$group)
+  fit_s  <- lmFit(expr_s, design_s)
+  cont_s <- makeContrasts(Pompe - Control, levels = design_s)
+  fit_s2 <- eBayes(contrasts.fit(fit_s, cont_s), robust = TRUE)
+  
+  tt_s <- topTable(fit_s2, coef = 1, number = Inf, sort.by = "P") %>%
+    tibble::rownames_to_column("PROBEID")
+  
+  ann_s <- AnnotationDbi::select(hgu133plus2.db,
+                                 keys = tt_s$PROBEID, keytype = "PROBEID",
+                                 columns = c("SYMBOL","ENTREZID")) %>%
+    distinct(PROBEID, .keep_all = TRUE)
+  
+  tt_gene_s <- tt_s %>%
+    left_join(ann_s, by = "PROBEID") %>%
+    filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
+    mutate(SYMBOL = toupper(SYMBOL)) %>%
+    group_by(SYMBOL) %>%
+    slice_max(order_by = abs(t), n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    arrange(desc(abs(t))) %>%
+    select(SYMBOL, logFC, t, P.Value, adj.P.Val, ENTREZID, PROBEID)
+  message("tt_gene_s üretildi: ", nrow(tt_gene_s), " gen.")
+}
+
+## 2) term2gene yoksa üret (örnek: Hallmark MSigDB)
+if (!exists("term2gene")) {
+  term2gene <- msigdbr(species = "Homo sapiens", category = "H") %>%  # H: Hallmark
+    transmute(term = gs_name, gene = toupper(gene_symbol)) %>%
+    distinct()
+  message("term2gene üretildi: ", n_distinct(term2gene$term), " set; ",
+          nrow(term2gene), " term-gen çifti.")
+}
+
+## 3) Ranks → geneList (işaretli sırayla, azalan)
+ranks_s <- tt_gene_s %>%
+  filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
+  mutate(SYMBOL = toupper(SYMBOL), t = as.numeric(t)) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  arrange(desc(t)) %>%
   { setNames(.$t, .$SYMBOL) }
 
-# 2) Gen setlerinde olanları al + SIRALA
-genes_in_sets <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
-geneList <- ranks_s[genes_in_sets]
-geneList <- sort(geneList, decreasing = TRUE)   # ← GSEA beklentisi
+term2gene$gene <- toupper(term2gene$gene)
+genes_in_sets  <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
+if (length(genes_in_sets) < 20)
+  stop("Kesişim çok düşük (", length(genes_in_sets),
+       "). term2gene evrenini veya sembolleri kontrol edin.")
 
-# 3) TERM2GENE’yi de aynı evrene indir
-t2g <- term2gene[term2gene$gene %in% names(geneList), ]
+geneList <- sort(ranks_s[genes_in_sets], decreasing = TRUE)
+t2g      <- term2gene[term2gene$gene %in% names(geneList), c("term","gene")]
 
-# 4) GSEA
-gsea_h_s <- clusterProfiler::GSEA(
-  geneList  = geneList,
-  TERM2GENE = t2g,
-  verbose   = FALSE
-)
+stopifnot(is.numeric(geneList), all(diff(unname(geneList)) <= 0))
+
+## 4) no-MELAS GSEA
+gsea_h_s <- GSEA(geneList = geneList, TERM2GENE = t2g,
+                 minGSSize = 10, verbose = FALSE)
+
+if (nrow(as.data.frame(gsea_h_s)) > 0) {
+  p_dot <- enrichplot::dotplot(gsea_h_s, showCategory = 20) +
+    ggplot2::labs(title = "no-MELAS GSEA — Dotplot")
+  print(p_dot)
+} else {
+  message("GSEA boş döndü (p.adj eşiği / evreni gözden geçirin).")
+}
 
 
 ## 5) KEGG GSEA (ENTREZ)
@@ -398,18 +457,18 @@ suppressPackageStartupMessages({
   library(clusterProfiler)
 })
 
- #0tt_gene yoksa, tt ve anotasyonla üret
+#0tt_gene yoksa, tt ve anotasyonla üret
 
-if (!exists("tt_gene")) {
-  stopifnot(exists("tt"), nrow(tt) > 0)
-  tt$PROBEID <- rownames(tt)
-  ann <- AnnotationDbi::select(hgu133plus2.db,
-                               keys    = tt$PROBEID,
-                               keytype = "PROBEID",
-                               columns = c("SYMBOL","ENTREZID"))
-  ann <- ann[!duplicated(ann$PROBEID), ]
-  tt_gene <- dplyr::left_join(tt, ann, by = "PROBEID")
-}
+#if (!exists("tt_gene")) {
+#  stopifnot(exists("tt"), nrow(tt) > 0)
+#  tt$PROBEID <- rownames(tt)
+#  ann <- AnnotationDbi::select(hgu133plus2.db,
+#                               keys    = tt$PROBEID,
+#                               keytype = "PROBEID",
+#                               columns = c("SYMBOL","ENTREZID"))
+#  ann <- ann[!duplicated(ann$PROBEID), ]
+#  tt_gene <- dplyr::left_join(tt, ann, by = "PROBEID")
+#}
 
 # 1) ENTREZ ve t-istatistiği (aynı ENTREZ için |t| en büyük olanı tut)
 eg_tbl <- tt_gene %>%
