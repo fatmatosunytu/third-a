@@ -1092,8 +1092,9 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     save_gg(p_mir, "predicted_top_targeting_miRNAs.png")
     utils::write.csv(top_mirnas, file.path(plot_dir, "predicted_top_targeting_miRNAs.csv"), row.names = FALSE)
     
-    ## ---------- 8) Alt-ag (top-30 gen & top-30 miRNA) ----------
-    suppressPackageStartupMessages({ library(ggraph); library(igraph); library(ggplot2) })
+    ## ---------- 8) Alt-ağ (top-30 gen & top-30 miRNA) ----------
+    ## ---------- 8) Alt-ağ (top-30 gen & top-30 miRNA) ----------
+    suppressPackageStartupMessages({ library(ggraph); library(igraph); library(ggplot2); library(pheatmap) })
     
     top_genes_vec  <- utils::head(gene_freq$Gene, min(30, nrow(gene_freq)))
     top_mirnas_vec <- utils::head(mir_freq$miRNA,  min(30, nrow(mir_freq)))
@@ -1106,68 +1107,102 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     colnames(edges_sub) <- c("Gene", "miRNA")
     edges_sub <- unique(stats::na.omit(edges_sub))
     
-if (nrow(edges_sub) >= 2) {
+    message("edges_sub satır: ", nrow(edges_sub))
+    
+    if (nrow(edges_sub) >= 2) {
       set.seed(42)
-      g <- igraph::graph_from_data_frame(edges_sub, directed = FALSE)
-      if (is.null(igraph::V(g)$name)) igraph::V(g)$name <- seq_len(igraph::vcount(g))
+      g_net <- igraph::graph_from_data_frame(edges_sub, directed = FALSE)
+      if (is.null(igraph::V(g_net)$name)) igraph::V(g_net)$name <- seq_len(igraph::vcount(g_net))
       
-      # Tanı: alt ağda kaç kenar var?
-      message("edges_sub satır: ", nrow(edges_sub))
+      # p_net'i güvenli kur
+      p_net <- tryCatch(
+        {
+          ggraph::ggraph(g_net, layout = "fr") +
+            ggraph::geom_edge_link(alpha = 0.4) +
+            ggraph::geom_node_point(size = 3) +
+            ggraph::geom_node_text(ggplot2::aes(label = name), repel = TRUE, size = 2.8) +
+            ggplot2::labs(title = "Predicted miRNA–Gen Bağlantı Ağı (alt küme)") +
+            ggplot2::theme_void(base_size = 14)
+        },
+        
+        error = function(e) { message ("p_net kurulamadı: ", e$message); NULL }
+        
+      )
       
-      p_net <- NULL
-      if (nrow(edges_sub) >= 2) {
-        # 0) Güvenlik: önceki 'g' karakter vektörünü bozmayalım
-        # rm(g)  # isterseniz tamamen temizleyin; yoksa bırakın
-        
-        # 1) igraph grafiğini OLUŞTUR (yeni isimle)
-        set.seed(42)
-        g_net <- igraph::graph_from_data_frame(edges_sub, directed = FALSE)
-        stopifnot(inherits(g_net, "igraph"))
-        
-        # 2) tepe isimleri varsa/ yoksa
-        if (is.null(igraph::V(g_net)$name)) {
-          igraph::V(g_net)$name <- seq_len(igraph::vcount(g_net))
-        }
-        
-        # 3) ggraph ile çizim
-        p_net <- ggraph::ggraph(g_net, layout = "fr") +
-          ggraph::geom_edge_link(alpha = 0.4) +
-          ggraph::geom_node_point(size = 3) +
-          ggraph::geom_node_text(ggplot2::aes(label = name), repel = TRUE, size = 2.8) +
-          ggplot2::labs(title = "Predicted miRNA–Gen Bağlantı Ağı (alt küme)") +
-          ggplot2::theme_void(base_size = 14)
-        
+      if (!is.null(p_net)) {
         print(p_net)
         
-        # 4) Kaydet
         dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
-        ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.png"),
-                        p_net, width = 10, height = 8, dpi = 300)
-        ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.pdf"),
-                        p_net, width = 10, height = 8, device = cairo_pdf)
         
+        # PNG
+        tryCatch(
+          ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.png"),
+                          p_net, width = 10, height = 8, dpi = 300),
+          error = function(e) message("PNG kaydetme hatası: ", e$message)
+        )
+        
+        # PDF (cairo yoksa base 'pdf' cihazına düş)
+        ok <- tryCatch({
+          ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.pdf"),
+                          p_net, width = 10, height = 8, device = cairo_pdf); TRUE
+        }, error = function(e) FALSE)
+        if (!ok) {
+          ggplot2::ggsave(file.path(plot_dir, "predicted_miRNA_gene_network.pdf"),
+                          p_net, width = 10, height = 8, device = "pdf")
+        }
+        
+        # Kenar tablosu
+        utils::write.csv(edges_sub,
+                         file = file.path(plot_dir, "predicted_network_edges_subset.csv"),
+                         row.names = FALSE)
+      } else {
+        message("p_net NULL; kaydetme adımları atlandı.")
+      }
+      
+      ## ---------- 9) Isı haritası (top-20x20) ----------
+      tab <- table(mm_net_predicted[[target_col]], mm_net_predicted[[mirna_col]])
+      row_sel <- utils::head(names(sort(rowSums(tab), decreasing = TRUE)), min(20, nrow(tab)))
+      col_sel <- utils::head(names(sort(colSums(tab), decreasing = TRUE)), min(20, ncol(tab)))
+      mat <- as.matrix(tab[row_sel, col_sel, drop = FALSE])
+      
+      if (nrow(mat) > 1 && ncol(mat) > 1) {
+        pheatmap::pheatmap(
+          mat,
+          cluster_rows = TRUE, cluster_cols = TRUE,
+          color = colorRampPalette(c("white","red"))(50),
+          main  = "Predicted miRNA–Gen Etkileşim Isı Haritası",
+          filename = file.path(plot_dir, "predicted_miRNA_gene_heatmap.png"),
+          width = 8, height = 6
+        )
+      } else {
+        message("Isı haritası için yeterli boyut yok: ", nrow(mat), "x", ncol(mat))
+      }
+    } else {
+      message("Ağ çizmek için kenar sayısı yetersiz (nrow(edges_sub) < 2).")
+    }
+    
     
     ## ---------- 9) Isı haritası (top-20x20) ----------
-    suppressPackageStartupMessages(library(pheatmap))
-    tab <- table(mm_net_predicted[[target_col]], mm_net_predicted[[mirna_col]])
-    row_sel <- utils::head(names(sort(rowSums(tab), decreasing = TRUE)), min(20, nrow(tab)))
-    col_sel <- utils::head(names(sort(colSums(tab), decreasing = TRUE)), min(20, ncol(tab)))
-    mat <- as.matrix(tab[row_sel, col_sel, drop = FALSE])
+#    suppressPackageStartupMessages(library(pheatmap))
+#    tab <- table(mm_net_predicted[[target_col]], mm_net_predicted[[mirna_col]])
+#    row_sel <- utils::head(names(sort(rowSums(tab), decreasing = TRUE)), min(20, nrow(tab)))
+#    col_sel <- utils::head(names(sort(colSums(tab), decreasing = TRUE)), min(20, ncol(tab)))
+#    mat <- as.matrix(tab[row_sel, col_sel, drop = FALSE])
     
-    if (nrow(mat) > 1 && ncol(mat) > 1) {
-      pheatmap::pheatmap(
-        mat,
-        cluster_rows = TRUE, cluster_cols = TRUE,
-        color = colorRampPalette(c("white","red"))(50),
-        main  = "Predicted miRNA–Gen Etkileşim Isı Haritası",
-        filename = file.path(plot_dir, "predicted_miRNA_gene_heatmap.png"),
-        width = 8, height = 6
-      )
-    }
-  }
- }
-}
-message(">> Predicted (TargetScan hariç) miRNA–hedef bloğu tamamlandı.")
+#    if (nrow(mat) > 1 && ncol(mat) > 1) {
+#      pheatmap::pheatmap(
+#        mat,
+#        cluster_rows = TRUE, cluster_cols = TRUE,
+#        color = colorRampPalette(c("white","red"))(50),
+#        main  = "Predicted miRNA–Gen Etkileşim Isı Haritası",
+#        filename = file.path(plot_dir, "predicted_miRNA_gene_heatmap.png"),
+#        width = 8, height = 6
+#      )
+#    }
+#  }
+# }
+
+#message(">> Predicted (TargetScan hariç) miRNA–hedef bloğu tamamlandı.")
 
 #DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
 
