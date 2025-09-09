@@ -427,7 +427,7 @@ ranks_s <- tt_gene_s %>%
 term2gene$gene <- toupper(term2gene$gene)
 genes_in_sets  <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
 if (length(genes_in_sets) < 20)
-  stop("Kesişim çok düşük (", length(genes_in_sets),
+   stop("Kesisim cok düsük (", length(genes_in_sets),
        "). term2gene evrenini veya sembolleri kontrol edin.")
 
 geneList <- sort(ranks_s[genes_in_sets], decreasing = TRUE)
@@ -971,8 +971,8 @@ extract_predicted_df <- function(mm) {
 ## ---------- 2) TargetScan hariç predicted sorgu ----------
 ## ---------- 2) TargetScan hariç predicted sorgu (chunk ve timeout'lu) ----------
 get_predicted_no_targetscan_chunked <- function(target_vec,
-                                                chunk_size = 50,
-                                                timeout_sec = 120,
+                                                chunk_size = 500,
+                                                timeout_sec = 1000,
                                                 sites = c("diana_microt","elmmo","microcosm","miranda","mirdb","pictar","pita")) {
   target_vec <- unique(na.omit(toupper(as.character(target_vec))))
   if (!length(target_vec)) return(NULL)
@@ -1055,6 +1055,7 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
 } else {
   
   ## ---------- 4) Hedef ve miRNA kolonlarını bul, normalize et ----------
+  
   target_col <- dplyr::case_when(
     "target_symbol" %in% names(mm_net_predicted) ~ "target_symbol",
     "SYMBOL"        %in% names(mm_net_predicted) ~ "SYMBOL",
@@ -1098,7 +1099,7 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     save_gg(p_genes, "predicted_top_targeted_genes.png")
     utils::write.csv(top_genes, file.path(plot_dir, "predicted_top_targeted_genes.csv"), row.names = FALSE)
     
-    ## ---------- 7) En çok gen hedefleyen miRNA’lar (barplot) ----------
+    ## ---------- 7) En çok gen hedefleyen miRNAlar (barplot) ----------
     mir_freq <- as.data.frame(table(mm_net_predicted[[mirna_col]], useNA = "no"))
     colnames(mir_freq) <- c("miRNA", "Count")
     mir_freq <- mir_freq[order(-mir_freq$Count), , drop = FALSE]
@@ -1113,8 +1114,10 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     save_gg(p_mir, "predicted_top_targeting_miRNAs.png")
     utils::write.csv(top_mirnas, file.path(plot_dir, "predicted_top_targeting_miRNAs.csv"), row.names = FALSE)
     
+    ## ---------- 8) Alt-ag (top-30 gen & top-30 miRNA) ----------
     ## ---------- 8) Alt-ağ (top-30 gen & top-30 miRNA) ----------
-    suppressPackageStartupMessages({ library(igraph); library(ggraph) })
+    suppressPackageStartupMessages({ library(ggraph); library(igraph); library(ggplot2) })
+    
     top_genes_vec  <- utils::head(gene_freq$Gene, min(30, nrow(gene_freq)))
     top_mirnas_vec <- utils::head(mir_freq$miRNA,  min(30, nrow(mir_freq)))
     
@@ -1129,18 +1132,37 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     if (nrow(edges_sub) >= 2) {
       set.seed(42)
       g <- igraph::graph_from_data_frame(edges_sub, directed = FALSE)
+      if (is.null(igraph::V(g)$name)) igraph::V(g)$name <- seq_len(igraph::vcount(g))
+      
       p_net <- ggraph::ggraph(g, layout = "fr") +
         ggraph::geom_edge_link(alpha = 0.4) +
         ggraph::geom_node_point(size = 3) +
-        ggraph::geom_node_text(ggplot2::aes(label = name), repel = TRUE, size = 2.8) +
+        ggraph::geom_node_text(aes(label = name), repel = TRUE, size = 2.8) +
         ggplot2::labs(title = "Predicted miRNA–Gen Bağlantı Ağı (alt küme)") +
         ggplot2::theme_void(base_size = 14)
       
-      ggplot2::ggsave(filename = file.path(plot_dir, "predicted_miRNA_gene_network.png"),
-                      plot = p_net, width = 10, height = 8, dpi = 300)
-      utils::write.csv(edges_sub, file.path(plot_dir, "predicted_network_edges_subset.csv"),
-                       row.names = FALSE)
+      print(p_net)   # <-- DOĞRU kullanım
+      
+      # Kaydet (PNG ve PDF)
+if (!dir.exists(plot_dir)) dir.create(plot_dir, recursive = TRUE)
+    out_png <- file.path(plot_dir, "predicted_miRNA_gene_network.png")
+      ggplot2::ggsave(out_png, p_net, width = 10, height = 8, dpi = 300)
+      
+      out_pdf <- file.path(plot_dir, "predicted_miRNA_gene_network.pdf")
+      pdf(file = out_pdf, width = 10, height = 8)
+      print(p_net)
+      dev.off()
+      
+      # Kenar tablosu
+      utils::write.csv(
+        edges_sub,
+        file = file.path(plot_dir, "predicted_network_edges_subset.csv"),
+        row.names = FALSE
+      )
+    } else {
+      message("Ağ çizmek için kenar sayısı yetersiz (nrow(edges_sub) < 2).")
     }
+    
     
     ## ---------- 9) Isı haritası (top-20x20) ----------
     suppressPackageStartupMessages(library(pheatmap))
