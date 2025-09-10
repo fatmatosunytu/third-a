@@ -29,8 +29,8 @@ packages <- c(
 
 invisible(lapply(packages, library, character.only = TRUE))
 
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install("multiMiR")
+#if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+#BiocManager::install("multiMiR")
 
 align_samples <- function(cel_files, pheno) {
   sample_names <- basename(cel_files)
@@ -140,7 +140,6 @@ rownames(aligned) <- cel_keys
 stopifnot(identical(rownames(aligned), cel_keys))
 
 #AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-
 
 ## === 0) CEL dosyalarını bul ===
 cel_dir <- "C:/Users/User/Documents/metadata"   # CEL'lerin gerçek yolu buysa
@@ -374,10 +373,11 @@ suppressPackageStartupMessages({
 })
 
 ## 0) no-MELAS altkümesi hazır mı?
-stopifnot(exists("expr_s"), exists("ph_s"))
-stopifnot(identical(colnames(expr_s), rownames(ph_s)))
-ph_s$group <- droplevels(factor(ph_s$group, levels = c("Control","Pompe")))
-if (nlevels(ph_s$group) < 2) stop("no-MELAS altkümesinde iki grup yok.")
+
+ stopifnot(exists("expr_s"), exists("ph_s"))
+ stopifnot(identical(colnames(expr_s), rownames(ph_s)))
+ ph_s$group <- droplevels(factor(ph_s$group, levels = c("Control","Pompe")))
+ if (nlevels(ph_s$group) < 2) stop("no-MELAS altkümesinde iki grup yok.")
 
 ## 1) tt_gene_s yoksa üret (limma → prob → gen)
 if (!exists("tt_gene_s")) {
@@ -427,7 +427,7 @@ ranks_s <- tt_gene_s %>%
 term2gene$gene <- toupper(term2gene$gene)
 genes_in_sets  <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
 if (length(genes_in_sets) < 20)
-   stop("Kesisim cok düsük (", length(genes_in_sets),
+  stop("Kesisim cok düsük (", length(genes_in_sets),
        "). term2gene evrenini veya sembolleri kontrol edin.")
 
 geneList <- sort(ranks_s[genes_in_sets], decreasing = TRUE)
@@ -667,8 +667,8 @@ p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group)) +
   # Etiketleri aç/kapat: aşağıdaki satırı yorumdan çıkarın
   # PCA etiketi
   ggrepel::geom_text_repel(aes(label = Sample), size = 3,
-                                            max.overlaps = Inf, show.legend = FALSE) +
-
+                           max.overlaps = Inf, show.legend = FALSE) +
+  
   theme_bw(base_size = 13) +
   labs(
     title = "PCA — Kanonik ifade (RMA ± ComBat)",
@@ -696,9 +696,9 @@ p_umap <- ggplot(um_df, aes(UMAP1, UMAP2, color = Group)) +
   stat_ellipse(type = "norm", linewidth = 0.5, alpha = 0.3, show.legend = FALSE) +
   geom_point(size = 2.2, alpha = 0.9) +
   # Etiketleri aç/kapat: aşağıdaki satırı yorumdan çıkarın
-# UMAP etiketi
-ggrepel::geom_text_repel(aes(label = Sample), size = 3,
-                                            max.overlaps = Inf, show.legend = FALSE) +
+  # UMAP etiketi
+  ggrepel::geom_text_repel(aes(label = Sample), size = 3,
+                           max.overlaps = Inf, show.legend = FALSE) +
   theme_minimal(base_size = 13) +
   labs(
     title = "UMAP — Kanonik ifade (RMA ± ComBat)",
@@ -717,72 +717,81 @@ ggsave(file.path(out_dir, "QC_UMAP.pdf"), p_umap, width = 6.5, height = 5.2)
 # Beklenenler:
 # - tt_gene_s: en azından kolonları "SYMBOL" ve "t" içeren tablo (no-MELAS karşılaştırması)
 # - term2gene: data.frame( term = ..., gene = ... ) yapısında kullanıcı tanımlı gen seti haritası
-p_gsea_dot <- p_gsea_le <- NULL
-
+# GSEA yalnızca girdiler uygunsa çalışsın
 if (exists("tt_gene_s") && is.data.frame(tt_gene_s) &&
     all(c("SYMBOL","t") %in% names(tt_gene_s)) &&
     exists("term2gene") && is.data.frame(term2gene) &&
     all(c("term","gene") %in% names(term2gene))) {
   
-  ranks_s <- tt_gene_s %>%
-    filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
-    mutate(SYMBOL = toupper(SYMBOL)) %>%
-    arrange(desc(abs(t))) %>%
+  # 1) Rank vektörü (SIGNED): t'ye göre azalan
+  ranks_s <- tt_gene_s |>
+    dplyr::filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) |>
+    dplyr::mutate(SYMBOL = toupper(SYMBOL)) |>
+    dplyr::distinct(SYMBOL, .keep_all = TRUE) |>
+    dplyr::arrange(dplyr::desc(t)) |>
     { setNames(.$t, .$SYMBOL) }
+  ranks_s <- sort(ranks_s, decreasing = TRUE)
   
-  # En az 50 gen isabeti olsun
+  # 2) Ortak evren ve TERM2GENE kırpma
   common_s <- intersect(names(ranks_s), term2gene$gene)
   
   if (length(common_s) >= 50) {
+    gl  <- ranks_s[common_s]
+    t2g <- term2gene[term2gene$gene %in% common_s, , drop = FALSE]
+    
+    # (İsteğe bağlı) paraleli kapat -> uyarılar sussun
+    
     set.seed(123)
-    gsea_h_s <- GSEA(
-      geneList  = geneList,
-      TERM2GENE = t2g,
-      pvalueCutoff = 1,     # rapor amaçlı üst sınır; daha sonra filtreleyebilirsiniz
-      verbose   = FALSE
+    gsea_h_s <- clusterProfiler::GSEA(
+      geneList     = gl,
+      TERM2GENE    = t2g,
+      pvalueCutoff = 1,
+      verbose      = FALSE
     )
     
-    # Sonuç varsa görselleştir
     if (nrow(as.data.frame(gsea_h_s)) > 0) {
-      # 4a) Dotplot (ilk 20 yolak)
-      p_gsea_dot <- dotplot(gsea_h_s, showCategory = 20, split = NULL) +
-        theme_bw(base_size = 12) +
-        labs(title = "no-MELAS GSEA — Enriched Pathways (Dotplot)")
+      # 3a) Dotplot
+      p_gsea_dot <- enrichplot::dotplot(gsea_h_s, showCategory = 20) +
+        ggplot2::theme_bw(base_size = 12) +
+        ggplot2::labs(title = "no-MELAS GSEA — Enriched Pathways (Dotplot)")
       
-      # 4b) En iyi yolak için leading-edge eğrisi
-      top_id <- gsea_h_s@result %>%
-        arrange(p.adjust) %>%
-        slice(1) %>% pull(ID)
+      # 3b) Leading-edge (ggplot elde etmek için pvalue_table = FALSE)
+      top_id <- gsea_h_s@result |>
+        dplyr::arrange(p.adjust) |>
+        dplyr::slice(1) |>
+        dplyr::pull(ID)
       
+      p_gsea_le <- NULL
       if (length(top_id) == 1 && !is.na(top_id)) {
-        p_gsea_le <- gseaplot2(gsea_h_s, geneSetID = top_id, pvalue_table = TRUE) +
-          labs(title = paste0("Leading-edge — ", top_id))
+        p_gsea_le <- enrichplot::gseaplot2(
+          gsea_h_s, geneSetID = top_id, pvalue_table = FALSE
+        ) + ggplot2::labs(title = paste0("Leading-edge — ", top_id))
       }
       
-      # Kaydet
+      # 4) Kaydet
       if (!is.null(p_gsea_dot))
-        ggsave(file.path(out_dir, "GSEA_noMELAS_Dotplot.png"), p_gsea_dot,
-               width = 7, height = 5.5, dpi = 300)
+        ggplot2::ggsave(file.path(out_dir, "GSEA_noMELAS_Dotplot.png"),
+                        p_gsea_dot, width = 7, height = 5.5, dpi = 300)
       if (!is.null(p_gsea_le))
-        ggsave(file.path(out_dir, "GSEA_noMELAS_LeadingEdge.png"), p_gsea_le,
-               width = 7, height = 5.5, dpi = 300)
+        ggplot2::ggsave(file.path(out_dir, "GSEA_noMELAS_LeadingEdge.png"),
+                        p_gsea_le, width = 7, height = 5.5, dpi = 300)
+
+      combo <- p_gsea_dot |>
+        (\(x) cowplot::plot_grid(x, p_gsea_le, ncol = 2, rel_widths = c(1, 1.2)))
       
-      # Rapor için kombine görsel
-      if (!is.null(p_gsea_dot) && !is.null(p_gsea_le)) {
-        combo <- plot_grid(p_gsea_dot, p_gsea_le, ncol = 2, rel_widths = c(1, 1.2))
-        ggsave(file.path(out_dir, "GSEA_noMELAS_Combined.png"), combo,
-               width = 12, height = 5.5, dpi = 300)
-      }
+      p_gsea_le <- enrichplot::gseaplot2(gsea_h_s, geneSetID = top_id, pvalue_table = FALSE) +
+        ggplot2::labs(title = paste0("Leading-edge — ", top_id))
+      
+
     } else {
-      message("GSEA: anlamlı yolak bulunamadı (p.adj filtrelerine bakınız).")
+      message("GSEA: anlamlı yolak bulunamadı (p.adj filtrelerini kontrol edin).")
     }
   } else {
-    message("no-MELAS GSEA atlandı: ortak rütbe >= 50 koşulu sağlanmadı.")
+    message("no-MELAS GSEA atlandı: ortak evrende ≥ 50 gen yok.")
   }
 } else {
-  message("GSEA atlandı: 'tt_gene_s' (SYMBOL,t) ve/veya 'term2gene'(term,gene) bulunamadı.")
+  message("GSEA atlandı: 'tt_gene_s'(SYMBOL,t) ve/veya 'term2gene'(term,gene) eksik.")
 }
-
 ## ====== 5) QC özet panelini de almak isterseniz ======
 qc_panel <- plot_grid(p_pca, p_umap, ncol = 2)
 ggsave(file.path(out_dir, "QC_Panel_PCA_UMAP.png"), qc_panel,
@@ -819,7 +828,7 @@ get_validated_mm <- function(targets,
                              # bu kaynaklara sonradan 'database' ile filtre uygular
                              sources = c("mirtarbase","mirecords","tarbase"),
                              chunk_size = 500,
-                             timeout_sec = 120) {
+                             timeout_sec = 1000) {
   tg <- unique(na.omit(toupper(as.character(targets))))
   if (!length(tg)) return(NULL)
   
@@ -836,12 +845,18 @@ get_validated_mm <- function(targets,
     call_list <- list(org="hsa", target=sub, table="validated", summary=FALSE)
     if (allow_legacy_out) call_list$legacy.out <- TRUE
     
-    mm <- try(
-      R.utils::withTimeout(do.call(multiMiR::get_multimir, call_list),
-                           timeout = timeout_sec, onTimeout = "silent"),
-      silent = TRUE
+    mm <- tryCatch(
+      R.utils::withTimeout(
+        do.call(multiMiR::get_multimir, call_list),
+        timeout = timeout_sec, onTimeout = "error"  # <-- değişti
+      ),
+      error = function(e) {
+        message("get_multimir hata: ", conditionMessage(e))
+        return(NULL)
+      }
     )
-    if (inherits(mm, "try-error") || is.null(mm)) { message("  ↳ get_multimir başarısız."); next }
+    if (is.null(mm)) { message("  ↳ get_multimir başarısız."); next }
+    
     df <- .extract_validated_df(mm)
     if (!is.null(df) && nrow(df)) {
       if ("database" %in% names(df)) df <- df[df$database %in% sources, , drop=FALSE]
@@ -1180,15 +1195,15 @@ if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     } else {
       message("Ağ çizmek için kenar sayısı yetersiz (nrow(edges_sub) < 2).")
     }
-    
-    
-    ## ---------- 9) Isı haritası (top-20x20) ----------
+  }  
+}   
+## ---------- 9) Isı haritası (top-20x20) ----------
 #    suppressPackageStartupMessages(library(pheatmap))
 #    tab <- table(mm_net_predicted[[target_col]], mm_net_predicted[[mirna_col]])
 #    row_sel <- utils::head(names(sort(rowSums(tab), decreasing = TRUE)), min(20, nrow(tab)))
 #    col_sel <- utils::head(names(sort(colSums(tab), decreasing = TRUE)), min(20, ncol(tab)))
 #    mat <- as.matrix(tab[row_sel, col_sel, drop = FALSE])
-    
+
 #    if (nrow(mat) > 1 && ncol(mat) > 1) {
 #      pheatmap::pheatmap(
 #        mat,
@@ -1399,10 +1414,10 @@ tt_gene <- tt_base |>
   ungroup()
 
 bg_genes  <- unique(tt_gene$SYMBOL)
-sig_genes <- unique(tt_gene$SYMBOL[tt_gene$adj.P.Val < 0.05])
+sig_genes <- unique(tt_gene$SYMBOL[tt_gene$adj.P.Val < 0.1])
 
 if (length(sig_genes) == 0) {
-  warning("adj.P.Val < 0.05 ile anlamlı gen yok; D bloğu atlanıyor.")
+  warning("adj.P.Val < 0.1 ile anlamlı gen yok; D bloğu atlanıyor.")
 } else {
   
   ## 6) DGIdb: Drug–Gene zenginleştirme (opsiyonel)
@@ -2148,17 +2163,17 @@ message(">> 'Hemen Kullan' Pompe figürleri üretildi. PNG'ler = ", normalizePat
 
 
 #KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK
-2) “Sanki hücre hattında denemiş gibi” in-silico değerlendirme yolları
+#2) “Sanki hücre hattında denemiş gibi” in-silico değerlendirme yolları
 
-Aşağıdaki mini bloklar senin mevcut boru hattınla uyumlu (ör: tt_sym, deg, expr_gene oluşturuyorsun).
+#Aşağıdaki mini bloklar senin mevcut boru hattınla uyumlu (ör: tt_sym, deg, expr_gene oluşturuyorsun).
 
-2.a) İmzanı (up/down genler) LINCS L1000 ile eşleştir (ilaç önerisi)
+#2.a) İmzanı (up/down genler) LINCS L1000 ile eşleştir (ilaç önerisi)
 
-Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
+#Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
 
-Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
-  
-  library(msigdbr); library(clusterProfiler); library(dplyr); library(stringr)
+#Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
+
+library(msigdbr); library(clusterProfiler); library(dplyr); library(stringr)
 
 msig_lincs <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:LINCS_L1000")
 lincs_up   <- split(toupper(msig_lincs$gene_symbol[str_ends(msig_lincs$gs_name, "_UP")]),
@@ -2174,15 +2189,15 @@ en_up_dn <- enricher(up_gen,   TERM2GENE = lincs_down, pAdjustMethod = "BH")
 en_dn_up <- enricher(down_gen, TERM2GENE = lincs_up,   pAdjustMethod = "BH")
 
 
-Çıkan zengin set adlarından ilacın adını ayıklayıp (örn. _UP/_DN temizle) “imzayı tersleyen” adayları raporlayabilirsin.
+#Çıkan zengin set adlarından ilacın adını ayıklayıp (örn. _UP/_DN temizle) “imzayı tersleyen” adayları raporlayabilirsin.
 
 
 
-2.b) İfade imzanı DepMap’te skorla ve CRISPR duyarlılığı ile ilişkilendir
+#2.b) İfade imzanı DepMap’te skorla ve CRISPR duyarlılığı ile ilişkilendir
 
-Pompe imzan için ssGSEA skoru hesaplayıp (cell-line bazında) belirli gen bağımlılıkları veya doku kökenleriyle ilişki kur:
-  
-  BiocManager::install("GSVA"); library(GSVA)
+#Pompe imzan için ssGSEA skoru hesaplayıp (cell-line bazında) belirli gen bağımlılıkları veya doku kökenleriyle ilişki kur:
+
+BiocManager::install("GSVA"); library(GSVA)
 
 # expr_depmap: genes x cell_lines (depmap_expression dan)
 common_genes <- intersect(rownames(expr_depmap), toupper(rownames(expr_gene)))
@@ -2193,10 +2208,10 @@ gaa_dep <- crispr %>% dplyr::filter(gene == "GAA") %>% dplyr::select(cell_line, 
 sc <- as.numeric(scores["POMPE_SIG", match(gaa_dep$cell_line, colnames(scores))])
 cor.test(sc, gaa_dep$gene_effect, method = "spearman")
 
-2.c) “Benim verim için ilaç duyarlılığı tahmini” (GDSC/CTRP ile eğitilmiş modeller)
+#2.c) “Benim verim için ilaç duyarlılığı tahmini” (GDSC/CTRP ile eğitilmiş modeller)
 
-oncoPredict (yeni & önerilir) veya pRRophetic (klasik).
-Bunlar GDSC/CTRP cell-line modelleriyle eğitilip senin örneklerinin (hücre hattı ya da doku) ilaç yanıtını tahmin eder.
+#oncoPredict (yeni & önerilir) veya pRRophetic (klasik).
+#Bunlar GDSC/CTRP cell-line modelleriyle eğitilip senin örneklerinin (hücre hattı ya da doku) ilaç yanıtını tahmin eder.
 
 # oncoPredict (özet kurulum)
 install.packages("oncoPredict")
@@ -2212,7 +2227,7 @@ pred <- oncoPredict::calcPhenotype(
 head(pred)   # ilaç bazında tahminler (AUC/IC50 ölçeği)
 
 
-Not: Bu yaklaşım “cell line’da test edilmiş gibi” bir in-silico tahmindir; gerçek ıslak-lab doğrulaması değildir.
+#Not: Bu yaklaşım “cell line’da test edilmiş gibi” bir in-silico tahmindir; gerçek ıslak-lab doğrulaması değildir.
 
 
 
