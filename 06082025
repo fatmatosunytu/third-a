@@ -372,9 +372,9 @@ suppressPackageStartupMessages({
   library(msigdbr); library(clusterProfiler); library(enrichplot)
 })
 
-## 0) no-MELAS altkümesi hazır mı?
+## 0) no-MELAS altkümesi hazır mı
 
- stopifnot(exists("expr_s"), exists("ph_s"))
+  stopifnot(exists("expr_s"), exists("ph_s"))
  stopifnot(identical(colnames(expr_s), rownames(ph_s)))
  ph_s$group <- droplevels(factor(ph_s$group, levels = c("Control","Pompe")))
  if (nlevels(ph_s$group) < 2) stop("no-MELAS altkümesinde iki grup yok.")
@@ -792,6 +792,7 @@ if (exists("tt_gene_s") && is.data.frame(tt_gene_s) &&
 } else {
   message("GSEA atlandı: 'tt_gene_s'(SYMBOL,t) ve/veya 'term2gene'(term,gene) eksik.")
 }
+
 ## ====== 5) QC özet panelini de almak isterseniz ======
 qc_panel <- plot_grid(p_pca, p_umap, ncol = 2)
 ggsave(file.path(out_dir, "QC_Panel_PCA_UMAP.png"), qc_panel,
@@ -1332,6 +1333,108 @@ tt_treat  <- limma::topTable(fit_treat, number = Inf)
 ## D BLOĞU: İlaç/Hedef & Ağ
 ## =========================
 
+
+
+
+
+
+
+
+
+
+# =====================================================================
+# BLOK-2 — D BLOĞUNU DAHA DAYANIKLI ÇALIŞTIRMAK İÇİN DÜZENLEMELER
+#  (Bu parçayı D bloğunun EN BAŞINA ekleyebilir veya uygun yerlerde
+#   var olan satırları bununla değiştirebilirsin.)
+# =====================================================================
+
+set.seed(123)
+options(stringsAsFactors = FALSE)
+
+# Kayıt klasörleri (yoksa oluştur)
+if (!exists("out_dir")  || is.null(out_dir))  out_dir  <- file.path(getwd(), "results/D_block")
+if (!exists("plot_dir") || is.null(plot_dir)) plot_dir <- file.path(getwd(), "plots/D_block")
+dir.create(out_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# İnternetli modüller için bayrakları otomatik düşür
+if (isTRUE(RUN_DGIDB)  && !requireNamespace("rDGIdb",   quietly = TRUE)) RUN_DGIDB  <- FALSE
+if (isTRUE(RUN_STRING) && !(requireNamespace("STRINGdb", quietly = TRUE) &&
+                            requireNamespace("igraph",   quietly = TRUE))) RUN_STRING <- FALSE
+if (isTRUE(RUN_GDSC)   && !(requireNamespace("PharmacoGx", quietly = TRUE) &&
+                            requireNamespace("curl",       quietly = TRUE))) RUN_GDSC   <- FALSE
+
+# Dışarıda kullanılacak objeleri başlat (scope problemi yaşamamak için)
+enr <- dg_best <- NULL
+g2  <- NULL
+
+# tt_base güvenlik: gerekli kolonlar var mı?
+if (!exists("tt_base") && exists("tt")) tt_base <- tt
+stopifnot(is.data.frame(tt_base))
+need_cols <- c("adj.P.Val", "SYMBOL")
+has_need  <- need_cols %in% colnames(tt_base)
+if (!all(has_need)) {
+  # SYMBOL yoksa anotasyon; adj.P.Val yoksa P.Value üzerinden türetmeye çalışma (analiz bloklarına geri dön)
+  if (!has_need[2] && !"PROBEID" %in% colnames(tt_base)) {
+    stop("tt_base içinde SYMBOL yok (ve PROBEID de yok). C bloğunda anotasyon ekleyin.")
+  }
+}
+
+# Gen seçimi esnek eşiğe çekilebilir (istersen parametreleştir)
+FDR_CUT <- 0.10
+tt_gene <- tt_base |>
+  dplyr::filter(!is.na(SYMBOL), nzchar(SYMBOL)) |>
+  dplyr::group_by(SYMBOL) |>
+  dplyr::slice_min(order_by = adj.P.Val, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()
+
+bg_genes  <- unique(tt_gene$SYMBOL)
+sig_genes <- unique(tt_gene$SYMBOL[tt_gene$adj.P.Val < FDR_CUT])
+
+if (length(sig_genes) < 5L) {
+  warning("Çok az anlamlı gen var; DGIdb/STRING adımları atlanabilir.")
+  RUN_DGIDB  <- FALSE
+  RUN_STRING <- FALSE
+}
+
+# DGIdb öncesi: clusterProfiler yüklü mü?
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  RUN_DGIDB <- FALSE
+}
+
+# STRING: aşırı büyük listelerde API yavaş olabilir; istersen sınırlayabilirsin
+MAX_STRING_GENES <- 500
+if (isTRUE(RUN_STRING) && length(sig_genes) > MAX_STRING_GENES) {
+  message("STRING için gen sayısı büyük; ilk ", MAX_STRING_GENES, " gen kullanılacak.")
+  sig_genes <- sig_genes[1:MAX_STRING_GENES]
+}
+
+# PharmacoGx: zaman aşımı/log
+if (isTRUE(RUN_GDSC)) {
+  ok_net <- try(curl::has_internet(), silent = TRUE)
+  if (inherits(ok_net, "try-error") || !isTRUE(ok_net)) {
+    RUN_GDSC <- FALSE
+    warning("İnternet yok: RUN_GDSC=FALSE.")
+  }
+  options(timeout = max(getOption("timeout"), 600))
+}
+
+# NOT: Bu düzenlemelerden sonra, mevcut D BLOĞUNU olduğu gibi çalıştır.
+# Ardından, 'BLOK-1' çıktıları için ek bloğu (tablo+görsel) çalıştırın.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## 0) Paketler (sessiz yükle)
 suppressPackageStartupMessages({
   library(AnnotationDbi)
@@ -1341,9 +1444,17 @@ suppressPackageStartupMessages({
   library(clusterProfiler)
 })
 # İnternet gerektirenler isteğe bağlı
-RUN_DGIDB  <- TRUE
-RUN_STRING <- TRUE
-RUN_GDSC   <- FALSE  # keşif amaçlı, default kapalı
+#RUN_DGIDB  <- TRUE
+#RUN_STRING <- TRUE
+#RUN_GDSC   <- TRUE  # keşif amaçlı, default kapalı
+
+if (isTRUE(RUN_DGIDB)  && !requireNamespace("rDGIdb",   quietly = TRUE)) RUN_DGIDB  <- FALSE
+if (isTRUE(RUN_STRING) && !(requireNamespace("STRINGdb", quietly = TRUE) &&
+                            requireNamespace("igraph",   quietly = TRUE))) RUN_STRING <- FALSE
+if (isTRUE(RUN_GDSC)   && !(requireNamespace("PharmacoGx", quietly = TRUE) &&
+                            requireNamespace("curl",       quietly = TRUE))) RUN_GDSC   <- FALSE
+
+# 
 
 if (RUN_DGIDB) {
   if (!requireNamespace("rDGIdb", quietly = TRUE)) {
@@ -1508,6 +1619,114 @@ if (length(sig_genes) == 0) {
     }
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+# =====================================================================
+# BLOK-1 — D BLOĞU SONRASI RAPOR ÇIKTILARI (TABLO + GÖRSEL KAYITLARI)
+#  (Bu bloğu D bloğunun ARKASINA yapıştırın)
+# =====================================================================
+
+suppressPackageStartupMessages({
+  library(enrichplot)
+  library(ggraph); library(igraph)
+  library(pheatmap)
+})
+
+# Klasörler
+if (!exists("out_dir")  || is.null(out_dir))  out_dir  <- file.path(getwd(), "results/D_block")
+if (!exists("plot_dir") || is.null(plot_dir)) plot_dir <- file.path(getwd(), "plots/D_block")
+dir.create(out_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ---------------- DGIdb — zenginleştirme çıktıları ----------------
+if (isTRUE(RUN_DGIDB) && exists("enr") && !is.null(enr)) {
+  enr_df <- try(as.data.frame(enr), silent = TRUE)
+  if (!inherits(enr_df, "try-error") && nrow(enr_df) > 0) {
+    utils::write.csv(enr_df, file.path(out_dir, "DGIdb_enrichment_full.csv"), row.names = FALSE)
+    if (exists("dg_best") && !is.null(dg_best)) {
+      utils::write.csv(dg_best, file.path(out_dir, "DGIdb_enrichment_best_by_drug.csv"), row.names = FALSE)
+    }
+    # Dotplot (ilk 20)
+    p_dg <- enrichplot::dotplot(enr, showCategory = 20) +
+      ggplot2::ggtitle("DGIdb drug enrichment") +
+      ggplot2::theme_bw(base_size = 12)
+    ggplot2::ggsave(file.path(plot_dir, "DGIdb_enrichment_dotplot.png"),
+                    p_dg, width = 8, height = 6, dpi = 300)
+  } else message("DGIdb: zenginleştirme tablosu boş.")
+} else message("DGIdb: 'enr' bulunamadı veya RUN_DGIDB=FALSE.")
+
+# ---------------- STRINGdb — PPI ağı & hub listesi ----------------
+if (isTRUE(RUN_STRING) && exists("g2") && igraph::is.igraph(g2) && igraph::ecount(g2) > 0) {
+  # Ağ görseli
+  set.seed(42)
+  p_ppi <- ggraph::ggraph(g2, layout = "fr") +
+    ggraph::geom_edge_link(alpha = 0.25) +
+    ggraph::geom_node_point(size = 2) +
+    ggraph::geom_node_text(ggplot2::aes(label = name), size = 2.4, repel = TRUE) +
+    ggplot2::theme_void(base_size = 12) +
+    ggplot2::ggtitle("STRING PPI — significant genes")
+  ggplot2::ggsave(file.path(plot_dir, "STRING_PPI_network.png"),
+                  p_ppi, width = 10, height = 8, dpi = 300)
+  
+  # Hub (degree) tablosu
+  deg <- sort(igraph::degree(g2), decreasing = TRUE)
+  hub_df <- data.frame(Gene = names(deg), Degree = as.integer(deg), row.names = NULL)
+  utils::write.csv(head(hub_df, 50), file.path(out_dir, "STRING_top50_hubs.csv"), row.names = FALSE)
+  
+  # İsteğe bağlı: topluluk (Louvain) özet
+  comm <- try(igraph::cluster_louvain(igraph::as.undirected(g2)), silent = TRUE)
+  if (!inherits(comm, "try-error")) {
+    memb <- data.frame(Gene = names(comm$membership), Community = as.integer(comm$membership))
+    utils::write.csv(memb, file.path(out_dir, "STRING_communities_Louvain.csv"), row.names = FALSE)
+  }
+} else message("STRING: g2 ağı yok veya RUN_STRING=FALSE.")
+
+# ------------- PharmacoGx/GDSC — küçük bir ısı haritası -------------
+if (isTRUE(RUN_GDSC) && exists("GDSC")) {
+  # AUC/AAC profilleri (paket sürümüne göre ölçü adı değişebilir)
+  sens <- try(PharmacoGx::sensitivityProfiles(GDSC, sensitivity.measure = "aac"), silent = TRUE)
+  if (inherits(sens, "try-error")) sens <- try(PharmacoGx::sensitivityProfiles(GDSC, sensitivity.measure = "AUC"), silent = TRUE)
+  
+  if (!inherits(sens, "try-error")) {
+    mat <- as.matrix(sens)
+    # En değişken 20 ilaç × ilk 40 hücre hattı (NA yoğunluğu azaltmak için basit seçim)
+    drugVar <- apply(mat, 1, function(x) stats::var(x, na.rm = TRUE))
+    keep_drugs <- names(sort(drugVar, decreasing = TRUE))[1:min(20, length(drugVar))]
+    keep_cells <- colnames(mat)[1:min(40, ncol(mat))]
+    submat <- mat[keep_drugs, keep_cells, drop = FALSE]
+    # Tamamen NA olan satır/sütunu at
+    submat <- submat[rowSums(is.na(submat)) < ncol(submat), , drop = FALSE]
+    submat <- submat[, colSums(is.na(submat)) < nrow(submat), drop = FALSE]
+    if (nrow(submat) >= 2 && ncol(submat) >= 2) {
+      # Satır ölçekli
+      submat_sc <- t(scale(t(submat)))
+      pheatmap::pheatmap(submat_sc,
+                         filename = file.path(plot_dir, "GDSC_top20drugs_heatmap.png"),
+                         main = "GDSC — top değişken ilaçlar (row-scaled)",
+                         width = 10, height = 8)
+      utils::write.csv(data.frame(Drug = names(drugVar), Variance = drugVar),
+                       file.path(out_dir, "GDSC_drug_variance.csv"), row.names = FALSE)
+    } else message("GDSC ısı haritası için yeterli boyut yok.")
+  } else message("PharmacoGx sensitivityProfiles okunamadı.")
+} else message("GDSC objesi yok veya RUN_GDSC=FALSE.")
+
+# Küçük özet
+cat("\n[ÇIKTI ÖZETİ]\n",
+    "- DGIdb (varsa): DGIdb_enrichment_full.csv, DGIdb_enrichment_best_by_drug.csv, DGIdb_enrichment_dotplot.png\n",
+    "- STRING (varsa): STRING_PPI_network.png, STRING_top50_hubs.csv, STRING_communities_Louvain.csv\n",
+    "- GDSC (varsa): GDSC_top20drugs_heatmap.png, GDSC_drug_variance.csv\n")
+
 
 ## 9) Kısa rapor
 cat("D bloğu tamamlandı.\n",
@@ -1988,7 +2207,7 @@ map_sym_to_entrez <- function(sym) {
 
 # --- BioCarta ssGSEA (örnek-bazlı) + ısı haritası ---
 {
-  bc_t2g <- msigdbr(species="Homo sapiens", collection = "C2", collection = "CP:BIOCARTA") |>
+  bc_t2g <- msigdbr(species="Homo sapiens", collection = "C2", subcollection = "CP:BIOCARTA") |>
     transmute(term = gs_name, gene = toupper(gene_symbol)) |> split(.$gene, .$term)
   # GSVA ssGSEA: gene-level (SYMBOL) gerektirir
   eset <- as.matrix(expr_gene)
@@ -2012,43 +2231,95 @@ map_sym_to_entrez <- function(sym) {
 # ============================================================
 # FIGÜR 4A–D — STRING PPI & Hub
 # ============================================================
-RUN_STRING <- TRUE
-if (RUN_STRING) {
-  ok <- requireNamespace("STRINGdb", quietly = TRUE) && requireNamespace("igraph", quietly = TRUE) && requireNamespace("ggraph", quietly = TRUE)
-  if (!ok) { warning("STRINGdb/igraph/ggraph bulunamadı; PPI figürü atlandı.") } else {
-    library(STRINGdb); library(igraph); library(ggraph)
-    sig_genes <- unique(tt_sym$SYMBOL[tt_sym$adj.P.Val < FDR_THRESH])
-    if (length(sig_genes) >= 5) {
-      string_db <- STRINGdb$new(version = "11.5", species = 9606, score_threshold = 400, input_directory = "")
-      mp <- try(string_db$map(data.frame(gene=sig_genes), "gene", removeUnmappedRows = TRUE), silent = TRUE)
-      if (!inherits(mp,"try-error") && nrow(mp)>0) {
-        ids <- unique(mp$STRING_id)
-        edges <- try(string_db$get_interactions(ids), silent = TRUE)
-        if (!inherits(edges,"try-error") && nrow(edges)>0) {
-          edges <- edges |> dplyr::filter(from %in% ids & to %in% ids) |> distinct(from,to,.keep_all=TRUE)
-          g <- graph_from_data_frame(edges[,c("from","to")], directed = FALSE)
-          # derece -> hub
-          degv <- sort(igraph::degree(g), decreasing = TRUE)
-          hubs <- head(degv, 10)
-          hub_df <- data.frame(STRING_id = names(hubs), degree = as.integer(hubs))
-          # geri haritala isim
-          hub_df$SYMBOL <- mp$gene[match(hub_df$STRING_id, mp$STRING_id)]
-          write.csv(hub_df, file.path(out_dir, "STRING_top10_hubs.csv"), row.names = FALSE)
-          
-          p_net <- ggraph(g, layout="fr") +
-            geom_edge_link(alpha=.3) +
-            geom_node_point(size=2) +
-            geom_node_text(aes(label = mp$gene[match(name, mp$STRING_id)]),
-                           repel=TRUE, size=2.6) +
-            theme_void(base_size=12) + ggtitle("STRING PPI — Pompe DEGs (adj.P<0.05)")
-          ggsave(file.path(plot_dir, "fig4_ppi_string_network.png"), p_net, width=10, height=8, dpi=300)
-          
-          p_hubs <- ggplot(hub_df, aes(x=reorder(SYMBOL, degree), y=degree)) +
-            geom_col() + coord_flip() + theme_minimal(base_size=12) +
-            labs(title="PPI Hub genler (derece)", x=NULL, y="Derece")
-          save_png(p_hubs, "fig4_ppi_hubs_bar.png", w=6.5, h=4.8)
-        }
-      }
+# ============================================================
+# HIZLI & DAYANIKLI STRING PPI + HUB BAR (figür kaydı dahil)
+# Mevcut bloğunuzun yerine geçebilir.
+# ============================================================
+suppressPackageStartupMessages({ library(STRINGdb); library(igraph); library(ggraph); library(dplyr) })
+library(R.utils)  # withTimeout için
+
+FDR_TH      <- if (exists("FDR_THRESH")) FDR_THRESH else 0.05
+MAX_GENES   <- 400      # en iyi 400 gen
+SCORE_MIN   <- 800      # daha sıkı eşik -> daha az kenar
+TOP_K_EDGES <- 5        # düğüm başına en iyi 5 kenar
+LABEL_HUBS  <- 50       # sadece 50 hub etiketlensin
+TIMEOUT_SEC <- 120
+
+# 0) Çıktı klasörleri
+if (!exists("out_dir") )  out_dir  <- file.path(getwd(), "results")
+if (!exists("plot_dir"))  plot_dir <- file.path(getwd(), "plots")
+dir.create(out_dir,  showWarnings = FALSE, recursive = TRUE)
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 1) Gen listesi (en anlamlı N gen)
+stopifnot(exists("tt_sym"))
+sig_genes <- tt_sym %>%
+  filter(!is.na(SYMBOL), SYMBOL != "", adj.P.Val < FDR_TH) %>%
+  arrange(adj.P.Val) %>%
+  pull(SYMBOL) %>% unique() %>%
+  head(MAX_GENES)
+
+if (length(sig_genes) < 5) {
+  warning("STRING atlandı: yeterli anlamlı gen yok.")
+} else {
+  # 2) STRING map + interactions (zaman aşımı)
+  string_db <- STRINGdb$new(version = "11.5", species = 9606, score_threshold = SCORE_MIN, input_directory = "")
+  mp <- string_db$map(data.frame(gene = sig_genes), "gene", removeUnmappedRows = TRUE)
+  ids <- unique(mp$STRING_id)
+  
+  edges <- try(withTimeout(string_db$get_interactions(ids),
+                           timeout = TIMEOUT_SEC, onTimeout = "error"), silent = TRUE)
+  if (inherits(edges, "try-error")) {
+    warning("STRING get_interactions zaman aşımına uğradı/başarısız.")
+  } else if (nrow(edges) == 0) {
+    warning("STRING: kenar bulunamadı.")
+  } else {
+    # 3) Temizle ve seyrekleştir
+    edges <- edges %>%
+      filter(from %in% ids & to %in% ids, combined_score >= SCORE_MIN) %>%
+      arrange(desc(combined_score)) %>%
+      group_by(from) %>% slice_head(n = TOP_K_EDGES) %>% ungroup() %>%
+      distinct(from, to, .keep_all = TRUE)
+    
+    g <- graph_from_data_frame(edges[, c("from","to")], directed = FALSE)
+    if (ecount(g) == 0) {
+      warning("STRING: filtre sonrası kenar kalmadı.")
+    } else {
+      # 4) Hub tablosu
+      degv   <- sort(degree(g), decreasing = TRUE)
+      hubs   <- head(degv, 10)
+      hub_df <- data.frame(
+        STRING_id = names(hubs),
+        degree    = as.integer(hubs),
+        SYMBOL    = mp$gene[match(names(hubs), mp$STRING_id)],
+        row.names = NULL
+      )
+      write.csv(hub_df, file.path(out_dir, "STRING_top10_hubs.csv"), row.names = FALSE)
+      
+      # 5) Grafiği çiz (yalnızca hub'ları etiketle)
+      vmap <- tibble(name = V(g)$name) %>%
+        mutate(SYMBOL = mp$gene[match(name, mp$STRING_id)],
+               is_hub = name %in% names(head(degv, LABEL_HUBS)))
+      
+      set.seed(42)
+      p_net <- ggraph(g, layout = "fr") +
+        geom_edge_link(alpha = 0.25, linewidth = 0.3) +
+        geom_node_point(size = 2) +
+        geom_node_text(data = vmap %>% filter(is_hub),
+                       aes(x = x, y = y, label = SYMBOL),
+                       size = 2.6, repel = TRUE) +
+        theme_void(base_size = 12) +
+        ggtitle(sprintf("STRING PPI — nV=%d, nE=%d (score≥%d)", gorder(g), gsize(g), SCORE_MIN))
+      
+      ggsave(file.path(plot_dir, "fig4_ppi_string_network.png"), p_net, width = 10, height = 8, dpi = 300)
+      
+      # 6) Hub barplot
+      p_hubs <- hub_df %>%
+        mutate(SYMBOL = ifelse(is.na(SYMBOL), STRING_id, SYMBOL)) %>%
+        ggplot(aes(x = reorder(SYMBOL, degree), y = degree)) +
+        geom_col() + coord_flip() + theme_minimal(base_size = 12) +
+        labs(title = "PPI hub genler (derece)", x = NULL, y = "Derece")
+      ggsave(file.path(plot_dir, "fig4_ppi_hubs_bar.png"), p_hubs, width = 7, height = 5, dpi = 300)
     }
   }
 }
@@ -2293,5 +2564,128 @@ if (!is.null(ego_bp) && nrow(as.data.frame(ego_bp)) > 0) {
   pgo <- barplot(ego_bp, showCategory = 20, title = "GO BP Enrichment")
   ggsave(filename = file.path(root_dir, "results", "GO_enrich_BP_barplot.png"), plot = pgo, width = 8, height = 6)
 }
+
+#####################################################################################################
+
+#Biocarta için başka iki altrnatif
+
+
+
+
+suppressPackageStartupMessages({
+  library(msigdbr); library(GSVA); library(pheatmap); library(dplyr); library(ggplot2)
+})
+
+## 1) MSigDB BIOCARTA → term2gene
+bc_t2g <- msigdbr(species = "Homo sapiens",
+                  category = "C2",           # DOĞRU ad
+                  subcategory = "CP:BIOCARTA") %>%   # DOĞRU ad
+  transmute(term = gs_name, gene = toupper(gene_symbol)) %>%
+  distinct()
+
+## 2) Yol-aklarını listeye çevir (GSVA ister)
+gs_list <- split(bc_t2g$gene, bc_t2g$term)
+
+## 3) İfade matrisi kontrolü
+# Burada satır adlarınızın GEN Sembolü olduğundan emin olun (SYMBOL)!
+stopifnot(identical(colnames(expr_mat), rownames(pheno_aligned)))
+expr_g <- as.matrix(expr_mat)  # satırlar: SYMBOL, kolonlar: örnek
+
+## (Opsiyonel) her yolakta en az 10 gen bulunsun
+gs_list <- lapply(gs_list, function(g) intersect(g, rownames(expr_g)))
+gs_list <- gs_list[vapply(gs_list, length, 1L) >= 10]
+
+## 4) ssGSEA (örnek-bazlı)
+set.seed(123)
+ssg <- GSVA::gsva(expr = expr_g, gset.idx.list = gs_list,
+                  method = "ssgsea", ssgsea.norm = TRUE,
+                  min.sz = 10, max.sz = 5000, verbose = FALSE)
+
+## 5) Gruplar ve kaba ayrışma ölçüsü (Pompe-Control farkı)
+grp <- droplevels(pheno_aligned$group)
+stopifnot(all(c("Control","Pompe") %in% levels(grp)))
+g1 <- which(grp == "Control"); g2 <- which(grp == "Pompe")
+
+delta <- rowMeans(ssg[, g2, drop = FALSE]) - rowMeans(ssg[, g1, drop = FALSE])
+top_sets <- names(sort(abs(delta), decreasing = TRUE))[seq_len(min(20, length(delta)))]
+
+## 6) Isı haritası (ilk 20 yolak)
+ann <- data.frame(Group = grp); rownames(ann) <- colnames(ssg)
+pheatmap::pheatmap(ssg[top_sets, , drop = FALSE],
+                   scale = "row",
+                   annotation_col = ann,
+                   show_rownames = TRUE, show_colnames = FALSE,
+                   clustering_distance_rows = "euclidean",
+                   clustering_method = "ward.D2",
+                   main = "BIOCARTA ssGSEA — top ayrışan setler",
+                   filename = file.path(plot_dir, "fig_biocarta_ssgsea_heatmap.png"),
+                   width = 9, height = 6)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+suppressPackageStartupMessages({
+  library(msigdbr); library(dplyr); library(GSVA); library(pheatmap)
+})
+
+## 1) MSigDB BIOCARTA setlerini al (sürüm uyumlu)
+bc_raw <-
+  if ("category" %in% names(formals(msigdbr::msigdbr))) {
+    msigdbr(species = "Homo sapiens",
+            category = "C2", subcategory = "CP:BIOCARTA")
+  } else {
+    msigdbr(species = "Homo sapiens",
+            gs_cat = "C2", gs_subcat = "CP:BIOCARTA")
+  }
+
+## 2) term2gene tablo
+bc_t2g <- bc_raw %>%
+  transmute(term = gs_name, gene = toupper(gene_symbol)) %>%
+  distinct()
+
+## 3) GSVA için yolak → gen listesi
+# (base::split kullan; base pipe ile anonim fonksiyon da olur)
+gs_list <- base::split(bc_t2g$gene, bc_t2g$term)
+# Alternatif (base pipe):
+# gs_list <- bc_t2g |> (\(df) base::split(df$gene, df$term))
+
+## 4) (isteğe bağlı) küçük setleri at ve ifadeyle kesiştir
+expr_g <- as.matrix(expr_mat)                     # satırlar: SYMBOL
+gs_list <- lapply(gs_list, intersect, rownames(expr_g))
+gs_list <- gs_list[vapply(gs_list, length, 1L) >= 10]
+
+## 5) ssGSEA
+set.seed(123)
+ssg <- GSVA::gsva(expr = expr_g, gset.idx.list = gs_list,
+                  method = "ssgsea", ssgsea.norm = TRUE, verbose = FALSE)
+
+## 6) Basit grup karşılaştırma ve ısı haritası
+grp <- droplevels(pheno_aligned$group)
+g1 <- which(grp == "Control"); g2 <- which(grp == "Pompe")
+delta <- rowMeans(ssg[, g2, drop = FALSE]) - rowMeans(ssg[, g1, drop = FALSE])
+top_sets <- names(sort(abs(delta), decreasing = TRUE))[seq_len(min(20, length(delta)))]
+
+ann <- data.frame(Group = grp); rownames(ann) <- colnames(ssg)
+pheatmap::pheatmap(ssg[top_sets, , drop = FALSE],
+                   scale = "row", annotation_col = ann,
+                   main = "BIOCARTA ssGSEA — en ayrışan setler",
+                   filename = file.path(plot_dir, "fig_biocarta_ssgsea_heatmap.png"),
+                   width = 9, height = 6)
+
 
 ################################################################################################################
